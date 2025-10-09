@@ -79,6 +79,20 @@ webapp/
     └── logs/                  # Anwendungs-Logs
 ```
 
+## ⚠️ Wichtige Hinweise
+
+### Datenbank-Hostname
+- Der PostgreSQL-Container heißt `nx2git-postgres`, nicht nur `postgres`
+- In der DATABASE_URL muss `@nx2git-postgres:5432` stehen
+
+### NGINX Proxy Manager Konfiguration
+- **Forward Hostname muss `nx2git-webapp` sein** (NICHT localhost oder 127.0.0.1!)
+- **Websocket Support muss aktiviert sein** für NiceGUI
+- Der DNS A-Record muss auf die öffentliche Server-IP zeigen
+
+### Bei Problemen
+Siehe [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) für detaillierte Lösungen zu häufigen Problemen.
+
 ## Installation und Setup
 
 ### Voraussetzungen

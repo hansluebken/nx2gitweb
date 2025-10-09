@@ -23,6 +23,7 @@ from .models.user import User
 from .models.audit_log import AuditLog
 from .models.password_reset import PasswordReset
 from .utils.validators import validate_email, validate_password, validate_username
+from .dto import UserDTO
 
 
 # JWT Configuration from environment
@@ -94,12 +95,12 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def generate_jwt_token(user: User) -> str:
+def generate_jwt_token(user) -> str:
     """
     Generate JWT token for user
 
     Args:
-        user: User object
+        user: User object or UserDTO
 
     Returns:
         JWT token string
@@ -107,7 +108,7 @@ def generate_jwt_token(user: User) -> str:
     # Token expiration time
     expiration = datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
 
-    # Token payload
+    # Token payload - works with both User model and UserDTO
     payload = {
         'user_id': user.id,
         'username': user.username,
@@ -282,7 +283,7 @@ def login_user(
     password: str,
     ip_address: Optional[str] = None,
     user_agent: Optional[str] = None
-) -> tuple[User, str]:
+) -> tuple[UserDTO, str]:
     """
     Login user and generate JWT token
 
@@ -294,7 +295,7 @@ def login_user(
         user_agent: Client user agent
 
     Returns:
-        Tuple of (User object, JWT token)
+        Tuple of (UserDTO object, JWT token)
 
     Raises:
         InvalidCredentialsError: If credentials are invalid
@@ -325,24 +326,53 @@ def login_user(
     if not user.is_active:
         raise InactiveUserError("User account is inactive")
 
+    # Capture all user data BEFORE any database operations
+    user_id = user.id
+    username = user.username
+    email = user.email
+    full_name = user.full_name
+    is_admin = user.is_admin
+    is_active = user.is_active
+    github_token_encrypted = user.github_token_encrypted
+    github_organization = user.github_organization
+    github_default_repo = user.github_default_repo
+
     # Update last login time
-    user.last_login = datetime.utcnow()
-    db.commit()
+    last_login_time = datetime.utcnow()
+    user.last_login = last_login_time
 
-    # Generate JWT token
-    token = generate_jwt_token(user)
-
-    # Create audit log for successful login
-    create_audit_log(
-        db=db,
-        user_id=user.id,
+    # Create audit log BEFORE committing (while user is still attached)
+    # We need to add the audit log entry but not commit it yet
+    audit_log = AuditLog(
+        user_id=user_id,
         action='login',
-        details=f"User {user.username} logged in",
+        details=f"User {username} logged in",
         ip_address=ip_address,
         user_agent=user_agent
     )
+    db.add(audit_log)
 
-    return user, token
+    # Now commit everything together
+    db.commit()
+
+    # Create UserDTO directly from captured values
+    user_dto = UserDTO(
+        id=user_id,
+        username=username,
+        email=email,
+        full_name=full_name,
+        is_admin=is_admin,
+        is_active=is_active,
+        last_login=last_login_time,
+        github_token_encrypted=github_token_encrypted,
+        github_organization=github_organization,
+        github_default_repo=github_default_repo
+    )
+
+    # Generate JWT token using the DTO
+    token = generate_jwt_token(user_dto)
+
+    return user_dto, token
 
 
 def logout_user(
@@ -375,7 +405,7 @@ def logout_user(
         )
 
 
-def get_user_from_token(db: Session, token: str) -> User:
+def get_user_from_token(db: Session, token: str) -> UserDTO:
     """
     Get user from JWT token
 
@@ -384,7 +414,7 @@ def get_user_from_token(db: Session, token: str) -> User:
         token: JWT token
 
     Returns:
-        User object
+        UserDTO object
 
     Raises:
         InvalidTokenError: If token is invalid
@@ -403,7 +433,10 @@ def get_user_from_token(db: Session, token: str) -> User:
     if not user.is_active:
         raise InactiveUserError("User account is inactive")
 
-    return user
+    # Create UserDTO from the user model while still in session
+    user_dto = UserDTO.from_model(user)
+
+    return user_dto
 
 
 def generate_password_reset_token(

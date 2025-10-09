@@ -85,16 +85,19 @@ def render_login_form():
 
             error_label.visible = False
 
+            db = None
             try:
                 db = get_db()
                 user, token = login_user(db, username, password)
-                db.close()
+
+                # UserDTO has all attributes already loaded
+                user_display_name = user.full_name or user.username
 
                 # Store token in session
                 app.storage.user[SESSION_TOKEN_KEY] = token
 
-                # Show success message
-                Toast.success(f'Welcome back, {user.full_name or user.username}!')
+                # Show success message using the stored name
+                Toast.success(f'Welcome back, {user_display_name}!')
 
                 # Redirect to dashboard
                 ui.navigate.to('/dashboard')
@@ -108,6 +111,9 @@ def render_login_form():
             except Exception as e:
                 error_label.text = f'Login failed: {str(e)}'
                 error_label.visible = True
+            finally:
+                if db:
+                    db.close()
 
         # Enter key submits form
         password_input.on('keydown.enter', handle_login)

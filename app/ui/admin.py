@@ -73,8 +73,11 @@ def render_overview(user):
         total_teams = db.query(Team).count()
         total_databases = db.query(Database).count()
 
-        # Recent activity
-        recent_logs = db.query(AuditLog).order_by(
+        # Recent activity - eagerly load the user relationship
+        from sqlalchemy.orm import joinedload
+        recent_logs = db.query(AuditLog).options(
+            joinedload(AuditLog.user)
+        ).order_by(
             AuditLog.created_at.desc()
         ).limit(10).all()
 
@@ -414,7 +417,8 @@ def render_audit_logs(user):
 
             db = get_db()
             try:
-                query = db.query(AuditLog)
+                from sqlalchemy.orm import joinedload
+                query = db.query(AuditLog).options(joinedload(AuditLog.user))
 
                 # Apply filters
                 if action_filter.value != 'All':
@@ -482,8 +486,9 @@ def render_statistics(user):
         # Server statistics
         total_servers = db.query(Server).count()
         active_servers = db.query(Server).filter(Server.is_active == True).count()
-        servers_with_github = db.query(Server).filter(
-            Server.github_token_encrypted.isnot(None)
+        # Now GitHub is stored in User model, not Server
+        users_with_github = db.query(User).filter(
+            User.github_token_encrypted.isnot(None)
         ).count()
 
         # Team and database statistics
@@ -517,7 +522,7 @@ def render_statistics(user):
             with ui.column().classes('w-full gap-3'):
                 ui.label(f'Total Servers: {total_servers}').classes('text-h6')
                 ui.label(f'Active Servers: {active_servers}').classes('text-grey-7')
-                ui.label(f'Servers with GitHub: {servers_with_github}').classes('text-grey-7')
+                ui.label(f'Users with GitHub: {users_with_github}').classes('text-grey-7')
 
         # Team and database statistics
         with Card(title='Team & Database Statistics', icon='folder'):

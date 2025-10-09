@@ -97,12 +97,12 @@ def render_server_card(user, server, container):
                 if server.custom_name:
                     ui.label(f'Custom Name: {server.custom_name}').classes('text-grey-7')
 
-                # GitHub configuration
-                if server.github_organization:
+                # Show GitHub config from user if available
+                if user.github_organization:
                     with ui.row().classes('items-center gap-2'):
                         ui.icon('github', size='sm').classes('text-grey-7')
                         ui.label(
-                            f'GitHub: {server.github_organization}/{server.github_repo_name or "ninox-backup"}'
+                            f'GitHub: {user.github_organization}/{user.github_default_repo or "ninox-backup"}'
                         ).classes('text-grey-7')
 
             # Actions
@@ -154,25 +154,6 @@ def show_add_server_dialog(user):
             placeholder='Optional custom identifier'
         )
 
-        # GitHub configuration
-        ui.separator().classes('my-4')
-        ui.label('GitHub Configuration (Optional)').classes('text-h6 mb-2')
-
-        github_token_input = FormField.password(
-            label='GitHub Token',
-            placeholder='GitHub Personal Access Token'
-        )
-
-        github_org_input = FormField.text(
-            label='GitHub Organization',
-            placeholder='your-organization'
-        )
-
-        github_repo_input = FormField.text(
-            label='GitHub Repository Name',
-            placeholder='ninox-backup'
-        )
-
         error_label = ui.label('').classes('text-negative mt-2')
         error_label.visible = False
 
@@ -182,9 +163,6 @@ def show_add_server_dialog(user):
             url = url_input.value.strip()
             api_key = api_key_input.value.strip()
             custom_name = custom_name_input.value.strip() or None
-            github_token = github_token_input.value.strip() or None
-            github_org = github_org_input.value.strip() or None
-            github_repo = github_repo_input.value.strip() or None
 
             if not name or not url or not api_key:
                 error_label.text = 'Please fill in all required fields'
@@ -195,7 +173,6 @@ def show_add_server_dialog(user):
                 # Encrypt sensitive data
                 encryption = get_encryption_manager()
                 api_key_encrypted = encryption.encrypt(api_key)
-                github_token_encrypted = encryption.encrypt(github_token) if github_token else None
 
                 # Create server
                 db = get_db()
@@ -205,9 +182,6 @@ def show_add_server_dialog(user):
                     url=url,
                     api_key_encrypted=api_key_encrypted,
                     custom_name=custom_name,
-                    github_token_encrypted=github_token_encrypted,
-                    github_organization=github_org,
-                    github_repo_name=github_repo,
                     is_active=True
                 )
                 db.add(server)
@@ -247,7 +221,6 @@ def show_edit_server_dialog(user, server, container):
     # Decrypt sensitive data
     encryption = get_encryption_manager()
     api_key = encryption.decrypt(server.api_key_encrypted)
-    github_token = encryption.decrypt(server.github_token_encrypted) if server.github_token_encrypted else ''
 
     with ui.dialog() as dialog, ui.card().classes('w-full p-6').style('min-width: 600px;'):
         ui.label('Edit Server').classes('text-h5 font-bold mb-4')
@@ -280,26 +253,6 @@ def show_edit_server_dialog(user, server, container):
             value=server.is_active
         )
 
-        # GitHub configuration
-        ui.separator().classes('my-4')
-        ui.label('GitHub Configuration (Optional)').classes('text-h6 mb-2')
-
-        github_token_input = FormField.password(
-            label='GitHub Token'
-        )
-        if github_token:
-            github_token_input.value = github_token
-
-        github_org_input = FormField.text(
-            label='GitHub Organization',
-            value=server.github_organization or ''
-        )
-
-        github_repo_input = FormField.text(
-            label='GitHub Repository Name',
-            value=server.github_repo_name or ''
-        )
-
         error_label = ui.label('').classes('text-negative mt-2')
         error_label.visible = False
 
@@ -310,9 +263,6 @@ def show_edit_server_dialog(user, server, container):
             api_key_new = api_key_input.value.strip()
             custom_name = custom_name_input.value.strip() or None
             is_active = is_active_checkbox.value
-            github_token_new = github_token_input.value.strip() or None
-            github_org = github_org_input.value.strip() or None
-            github_repo = github_repo_input.value.strip() or None
 
             if not name or not url or not api_key_new:
                 error_label.text = 'Please fill in all required fields'
@@ -323,7 +273,6 @@ def show_edit_server_dialog(user, server, container):
                 # Encrypt sensitive data
                 encryption = get_encryption_manager()
                 api_key_encrypted = encryption.encrypt(api_key_new)
-                github_token_encrypted = encryption.encrypt(github_token_new) if github_token_new else None
 
                 # Update server
                 db = get_db()
@@ -333,9 +282,6 @@ def show_edit_server_dialog(user, server, container):
                 db_server.api_key_encrypted = api_key_encrypted
                 db_server.custom_name = custom_name
                 db_server.is_active = is_active
-                db_server.github_token_encrypted = github_token_encrypted
-                db_server.github_organization = github_org
-                db_server.github_repo_name = github_repo
                 db.commit()
 
                 # Create audit log

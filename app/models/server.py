@@ -23,7 +23,8 @@ class Server(Base, TimestampMixin):
     # Status
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    # GitHub Configuration (encrypted)
+    # GitHub Configuration (deprecated - moved to User model)
+    # Kept for backward compatibility, will be removed in future version
     github_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     github_organization: Mapped[str | None] = mapped_column(String(255), nullable=True)
     github_repo_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

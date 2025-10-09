@@ -57,6 +57,7 @@ class NavHeader:
                             on_click=lambda: None
                         ).props('disable')
                         ui.separator()
+                        ui.menu_item('Profile', on_click=lambda: ui.navigate.to('/profile'))
                         ui.menu_item('Logout', on_click=lambda: ui.navigate.to('/logout'))
 
     def _nav_link(self, label: str, path: str, icon: str):

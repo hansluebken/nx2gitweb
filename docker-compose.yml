@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nx2git}
       POSTGRES_USER: ${POSTGRES_USER:-nx2git}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./data/database:/var/lib/postgresql/data
     networks:
@@ -20,9 +20,11 @@ services:
   webapp:
     build: .
     container_name: nx2git-webapp
+    env_file:
+      - .env
     environment:
-      # Database
-      DATABASE_URL: postgresql://${POSTGRES_USER:-nx2git}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-nx2git}
+      # Database - explicitly override to ensure correct value
+      DATABASE_URL: postgresql://nx2git:nx2gitSecurePassword2024@nx2git-postgres:5432/nx2git
 
       # Security
       SECRET_KEY: ${SECRET_KEY}
@@ -43,14 +45,19 @@ services:
       # Application
       APP_NAME: Ninox2Git WebApp
       APP_URL: https://nx2git.netz-fabrik.net
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8765
       ADMIN_EMAIL: ${ADMIN_EMAIL}
 
       # NiceGUI
       NICEGUI_PORT: 8765
+      SESSION_SECRET: ${SECRET_KEY}
 
     volumes:
       - ./data/keys:/app/data/keys
       - ./data/logs:/app/data/logs
+    # ports:
+    #   - "8765:8765"  # Uncomment for direct access during testing
     networks:
       - nx2git-internal
       - proxy-network

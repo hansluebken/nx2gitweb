@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 from .database import init_db, get_db
 from .auth import create_admin_user, get_user_from_token, InvalidTokenError
-from .ui import login, dashboard, servers, teams, sync, admin
+from .ui import login, dashboard, servers, teams, sync, admin, profile
 
 # Configure logging
 logging.basicConfig(
@@ -56,10 +56,7 @@ def require_auth():
     Redirects to login if not authenticated
 
     Returns:
-        User object if authenticated
-
-    Raises:
-        Redirects to login page if not authenticated
+        User object if authenticated, None if not authenticated
     """
     user = get_current_user()
     if not user:
@@ -108,18 +105,43 @@ def login_page():
 @ui.page('/dashboard')
 def dashboard_page():
     """Main dashboard page"""
-    user = require_auth()
-    if not user:
+    # Check authentication BEFORE rendering anything
+    token = app.storage.user.get(SESSION_TOKEN_KEY)
+    if not token:
+        ui.navigate.to('/login')
         return
 
+    try:
+        db = get_db()
+        user = get_user_from_token(db, token)
+        db.close()
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        app.storage.user.pop(SESSION_TOKEN_KEY, None)
+        ui.navigate.to('/login')
+        return
+
+    # Only render if we have a valid user
     dashboard.render(user)
 
 
 @ui.page('/servers')
 def servers_page():
     """Server management page"""
-    user = require_auth()
-    if not user:
+    # Check authentication BEFORE rendering anything
+    token = app.storage.user.get(SESSION_TOKEN_KEY)
+    if not token:
+        ui.navigate.to('/login')
+        return
+
+    try:
+        db = get_db()
+        user = get_user_from_token(db, token)
+        db.close()
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        app.storage.user.pop(SESSION_TOKEN_KEY, None)
+        ui.navigate.to('/login')
         return
 
     servers.render(user)
@@ -128,8 +150,19 @@ def servers_page():
 @ui.page('/teams')
 def teams_page():
     """Team management page"""
-    user = require_auth()
-    if not user:
+    token = app.storage.user.get(SESSION_TOKEN_KEY)
+    if not token:
+        ui.navigate.to('/login')
+        return
+
+    try:
+        db = get_db()
+        user = get_user_from_token(db, token)
+        db.close()
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        app.storage.user.pop(SESSION_TOKEN_KEY, None)
+        ui.navigate.to('/login')
         return
 
     teams.render(user)
@@ -138,8 +171,19 @@ def teams_page():
 @ui.page('/sync')
 def sync_page():
     """Synchronization page"""
-    user = require_auth()
-    if not user:
+    token = app.storage.user.get(SESSION_TOKEN_KEY)
+    if not token:
+        ui.navigate.to('/login')
+        return
+
+    try:
+        db = get_db()
+        user = get_user_from_token(db, token)
+        db.close()
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        app.storage.user.pop(SESSION_TOKEN_KEY, None)
+        ui.navigate.to('/login')
         return
 
     sync.render(user)
@@ -148,11 +192,49 @@ def sync_page():
 @ui.page('/admin')
 def admin_page():
     """Admin panel page - admin only"""
-    user = require_admin()
-    if not user:
+    token = app.storage.user.get(SESSION_TOKEN_KEY)
+    if not token:
+        ui.navigate.to('/login')
+        return
+
+    try:
+        db = get_db()
+        user = get_user_from_token(db, token)
+        db.close()
+
+        # Additional admin check
+        if not user.is_admin:
+            ui.notify('Admin privileges required', type='negative')
+            ui.navigate.to('/dashboard')
+            return
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        app.storage.user.pop(SESSION_TOKEN_KEY, None)
+        ui.navigate.to('/login')
         return
 
     admin.render(user)
+
+
+@ui.page('/profile')
+def profile_page():
+    """User profile page"""
+    token = app.storage.user.get(SESSION_TOKEN_KEY)
+    if not token:
+        ui.navigate.to('/login')
+        return
+
+    try:
+        db = get_db()
+        user = get_user_from_token(db, token)
+        db.close()
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        app.storage.user.pop(SESSION_TOKEN_KEY, None)
+        ui.navigate.to('/login')
+        return
+
+    profile.render(user)
 
 
 @ui.page('/logout')

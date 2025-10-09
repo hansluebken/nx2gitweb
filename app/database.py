@@ -9,8 +9,10 @@ from sqlalchemy.pool import Pool
 from .models.base import Base
 
 
-# Database URL from environment
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://nx2git:changeme@postgres:5432/nx2git')
+# Database URL from environment - MUST be set in environment
+DATABASE_URL = os.getenv('DATABASE_URL')
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable is not set!")
 
 # Create engine
 engine = create_engine(

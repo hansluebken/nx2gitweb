@@ -22,6 +22,11 @@ class User(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # GitHub configuration (encrypted)
+    github_token_encrypted: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    github_organization: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    github_default_repo: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     # Timestamps
     last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
