@@ -61,6 +61,7 @@ class NinoxToMermaidConverter:
             self.tables[type_id] = {
                 'name': table_name,
                 'caption': type_data.get('caption', type_id),
+                'uuid': type_data.get('uuid'),  # Store UUID for reference resolution
                 'fields': [],
                 'references': []
             }
@@ -84,18 +85,47 @@ class NinoxToMermaidConverter:
 
                     # Check for relationships
                     if field_type in ['ref', 'rev']:
-                        # Reference to another table
-                        ref_type = field_data.get('type')
-                        if ref_type and ref_type in types:
+                        # Reference to another table - Ninox uses refTypeId or refTypeUUID
+                        ref_type_id = field_data.get('refTypeId')
+                        ref_type_uuid = field_data.get('refTypeUUID')
+                        ref_db_id = field_data.get('dbId')  # For cross-database references
+
+                        # Try to find the target table
+                        target_type = None
+
+                        # First try by refTypeId (local reference)
+                        if ref_type_id and ref_type_id in types:
+                            target_type = ref_type_id
+                        # Then try by UUID
+                        elif ref_type_uuid:
+                            # Find type by UUID
+                            for tid, tdata in types.items():
+                                if tdata.get('uuid') == ref_type_uuid:
+                                    target_type = tid
+                                    break
+
+                        if target_type:
+                            # Local reference within same database
                             self.relationships.append({
                                 'from': type_id,
-                                'to': ref_type,
+                                'to': target_type,
                                 'field': field_caption,
-                                'type': 'one-to-many' if field_type == 'ref' else 'many-to-many'
+                                'type': 'one-to-many' if field_type == 'ref' else 'many-to-many',
+                                'is_external': False
                             })
                             self.tables[type_id]['references'].append({
                                 'field': field_caption,
-                                'target': ref_type
+                                'target': target_type,
+                                'is_external': False
+                            })
+                        elif ref_db_id:
+                            # External reference to another database
+                            # We can't resolve it here, but we can document it
+                            self.tables[type_id]['references'].append({
+                                'field': field_caption,
+                                'target': f'External_DB_{ref_db_id}',
+                                'is_external': True,
+                                'db_id': ref_db_id
                             })
 
     def _sanitize_name(self, name: str) -> str:
@@ -129,7 +159,11 @@ class NinoxToMermaidConverter:
 
     def generate_relationships(self) -> str:
         """Generate a diagram showing only relationships between tables"""
-        if not self.relationships:
+        has_local = any(not rel.get('is_external', False) for rel in self.relationships)
+        has_external = any(table.get('references', []) for table in self.tables.values()
+                          if any(ref.get('is_external', False) for ref in table.get('references', [])))
+
+        if not has_local and not has_external:
             return "erDiagram\n    %% No relationships found"
 
         mermaid = "erDiagram\n"
@@ -138,26 +172,40 @@ class NinoxToMermaidConverter:
         # Track which tables are involved in relationships
         involved_tables = set()
 
-        # Add relationships
-        for rel in self.relationships:
-            from_table = self.tables[rel['from']]['name']
-            to_table = self.tables[rel['to']]['name']
-            involved_tables.add(rel['from'])
-            involved_tables.add(rel['to'])
+        # Add local relationships
+        if has_local:
+            mermaid += "    %% Local relationships (within this database)\n"
+            for rel in self.relationships:
+                if not rel.get('is_external', False):
+                    from_table = self.tables[rel['from']]['name']
+                    to_table = self.tables[rel['to']]['name']
+                    involved_tables.add(rel['from'])
+                    involved_tables.add(rel['to'])
 
-            if rel['type'] == 'one-to-many':
-                mermaid += f'    {from_table} ||--o{{ {to_table} : "{rel["field"]}"\n'
-            else:
-                mermaid += f'    {from_table} }}o--o{{ {to_table} : "{rel["field"]}"\n'
+                    if rel['type'] == 'one-to-many':
+                        mermaid += f'    {from_table} ||--o{{ {to_table} : "{rel["field"]}"\n'
+                    else:
+                        mermaid += f'    {from_table} }}o--o{{ {to_table} : "{rel["field"]}"\n'
+
+        # Document external references (can't draw them as lines)
+        if has_external:
+            mermaid += "\n    %% External references (to other databases)\n"
+            for type_id, table in self.tables.items():
+                external_refs = [ref for ref in table.get('references', []) if ref.get('is_external', False)]
+                if external_refs:
+                    mermaid += f'    %% {table["name"]} has external references:\n'
+                    for ref in external_refs:
+                        mermaid += f'    %%   - {ref["field"]} -> Database: {ref.get("db_id", "Unknown")}\n'
 
         # Add table definitions (only involved tables, no fields)
-        mermaid += "\n    %% Table definitions (structure only)\n"
-        for type_id in involved_tables:
-            if type_id in self.tables:
-                table = self.tables[type_id]
-                mermaid += f'    {table["name"]} {{\n'
-                mermaid += f'        string table_info "Table: {table["caption"]}"\n'
-                mermaid += f'    }}\n\n'
+        if involved_tables:
+            mermaid += "\n    %% Table definitions (structure only)\n"
+            for type_id in involved_tables:
+                if type_id in self.tables:
+                    table = self.tables[type_id]
+                    mermaid += f'    {table["name"]} {{\n'
+                    mermaid += f'        string table_info "Table: {table["caption"]}"\n'
+                    mermaid += f'    }}\n\n'
 
         return mermaid
 
