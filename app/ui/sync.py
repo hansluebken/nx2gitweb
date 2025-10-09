@@ -1,8 +1,9 @@
 """
 Synchronization page for Ninox2Git
 """
-from nicegui import ui
+from nicegui import ui, background_tasks
 from datetime import datetime
+import asyncio
 from ..database import get_db
 from ..models.server import Server
 from ..models.team import Team
@@ -88,40 +89,55 @@ def render_selectors(user, databases_container, history_container):
         # Update teams when server changes
         def on_server_change(e):
             if e.value:
-                server = server_options[e.value]
-                teams = db.query(Team).filter(
-                    Team.server_id == server.id,
-                    Team.is_active == True
-                ).all()
-                team_options = {team.name: team for team in teams}
-                team_select.options = list(team_options.keys())
-                team_select.value = list(team_options.keys())[0] if team_options else None
-                team_select.update()
+                # Use a NEW db session for this event
+                event_db = get_db()
+                try:
+                    server = server_options[e.value]
+                    teams = event_db.query(Team).filter(
+                        Team.server_id == server.id,
+                        Team.is_active == True
+                    ).all()
+                    team_options = {team.name: team for team in teams}
+                    team_select.options = list(team_options.keys())
+                    team_select.value = list(team_options.keys())[0] if team_options else None
+                    team_select.update()
 
-                # Store team options for later use
-                team_select.team_options = team_options
+                    # Store team options for later use
+                    team_select.team_options = team_options
 
-                # Load databases if team is selected
-                if team_select.value:
-                    load_databases(
-                        user,
-                        server,
-                        team_options[team_select.value],
-                        databases_container
-                    )
-                    load_sync_history(
-                        user,
-                        team_options[team_select.value],
-                        history_container
-                    )
+                    # Load databases if team is selected
+                    if team_select.value:
+                        load_databases(
+                            user,
+                            server,
+                            team_options[team_select.value],
+                            databases_container
+                        )
+                        load_sync_history(
+                            user,
+                            team_options[team_select.value],
+                            history_container
+                        )
+                finally:
+                    event_db.close()
 
         # Update databases when team changes
         def on_team_change(e):
-            if e.value and server_select.value:
+            import logging
+            logger = logging.getLogger(__name__)
+
+            # Get the actual value from team_select, not from event
+            team_name = team_select.value
+            logger.info(f"=== TEAM CHANGE EVENT === team_name={team_name}, server={server_select.value}")
+
+            if team_name and server_select.value and hasattr(team_select, 'team_options'):
                 server = server_options[server_select.value]
-                team = team_select.team_options[e.value]
+                team = team_select.team_options[team_name]
+                logger.info(f"Loading databases for team: {team.name} (id={team.id})")
                 load_databases(user, server, team, databases_container)
                 load_sync_history(user, team, history_container)
+            else:
+                logger.warning(f"Team change event but missing values: team={team_name}, server={server_select.value}")
 
         server_select.on('update:model-value', on_server_change)
         team_select.on('update:model-value', on_team_change)
@@ -136,13 +152,18 @@ def render_selectors(user, databases_container, history_container):
 
 def load_databases(user, server, team, container):
     """Load and display databases for a team"""
+    import logging
+    logger = logging.getLogger(__name__)
+
     container.clear()
 
     db = get_db()
     try:
+        logger.info(f"Loading databases for team_id={team.id}, team_name={team.name}")
         databases = db.query(Database).filter(
             Database.team_id == team.id
         ).order_by(Database.name).all()
+        logger.info(f"Found {len(databases)} databases for team {team.name}")
 
         if not databases:
             with container:
@@ -200,15 +221,17 @@ def render_database_card(user, server, team, database, container):
             # Actions
             with ui.column().classes('gap-2'):
                 if not database.is_excluded:
-                    ui.button(
+                    sync_btn = ui.button(
                         'Sync Now',
                         icon='sync',
-                        on_click=lambda d=database: sync_database(user, server, team, d, container)
+                        on_click=lambda d=database, btn=None: handle_sync_click(user, server, team, d, container, btn)
                     ).props('flat dense color=primary')
+                    # Store reference for later
+                    sync_btn._database = database
 
-                if database.github_path and server.github_organization:
-                    repo_name = server.github_repo_name or 'ninox-backup'
-                    github_url = f'https://github.com/{server.github_organization}/{repo_name}/tree/main/{database.github_path}'
+                if database.github_path and user.github_organization:
+                    repo_name = user.github_default_repo or 'ninox-backup'
+                    github_url = f'https://github.com/{user.github_organization}/{repo_name}/tree/main/{database.github_path}'
                     ui.button(
                         'View on GitHub',
                         icon='open_in_new',
@@ -233,48 +256,153 @@ def render_database_card(user, server, team, database, container):
                     ).props('flat dense color=warning')
 
 
-async def sync_database(user, server, team, database, container):
-    """Sync a single database"""
-    try:
-        # Show loading message
-        Toast.info(f'Syncing database "{database.name}"...')
+def handle_sync_click(user, server, team, database, container, button):
+    """Handle sync button click with loading state"""
+    import logging
+    logger = logging.getLogger(__name__)
 
-        # Decrypt credentials
+    # Create progress dialog
+    with ui.dialog() as progress_dialog, ui.card().classes('p-6'):
+        with ui.column().classes('items-center gap-4').style('min-width: 300px;'):
+            ui.spinner(size='xl', color='primary')
+            status_label = ui.label(f'Syncing "{database.name}"...').classes('text-h6 text-center')
+            progress_label = ui.label('Initializing...').classes('text-grey-7 text-center')
+
+    progress_dialog.open()
+
+    # Create async task
+    async def run_sync():
+        try:
+            logger.info(f"=== SYNC START === Database: {database.name}")
+
+            progress_label.text = 'Fetching from Ninox...'
+            await asyncio.sleep(0.1)  # Let UI update
+
+            # Run the actual sync
+            await sync_database(user, server, team, database, container, progress_label)
+
+            progress_label.text = 'Complete!'
+            await asyncio.sleep(0.5)
+            progress_dialog.close()
+            Toast.success(f'Database "{database.name}" synced successfully!')
+
+        except Exception as e:
+            logger.error(f"Sync error: {e}")
+            progress_dialog.close()
+            Toast.error(f'Error: {str(e)}')
+
+    # Start background task
+    background_tasks.create(run_sync())
+
+
+async def sync_database(user, server, team, database, container, progress_label=None):
+    """Sync a single database"""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        logger.info(f"=== SYNC START === Database: {database.name} (id={database.id})")
+
+        # Step 1: Decrypt credentials
+        if progress_label:
+            progress_label.text = 'Decrypting credentials...'
+            await asyncio.sleep(0.1)
+
         encryption = get_encryption_manager()
         api_key = encryption.decrypt(server.api_key_encrypted)
 
-        # Create Ninox client
+        # Step 2: Connect to Ninox
+        if progress_label:
+            progress_label.text = 'Connecting to Ninox server...'
+            await asyncio.sleep(0.1)
+
         client = NinoxClient(server.url, api_key)
 
-        # Fetch database structure
-        db_structure = client.get_database_structure(team.team_id, database.database_id)
+        # Step 3: Fetch database structure
+        if progress_label:
+            progress_label.text = 'Downloading database structure...'
+            await asyncio.sleep(0.1)
 
-        # Check if GitHub is configured
-        if server.github_token_encrypted and server.github_organization:
-            github_token = encryption.decrypt(server.github_token_encrypted)
-            repo_name = server.github_repo_name or 'ninox-backup'
+        logger.info(f"Fetching structure from Ninox...")
+        db_structure = client.get_database_structure(team.team_id, database.database_id)
+        logger.info(f"Structure fetched: {len(str(db_structure))} chars")
+
+        # Check if GitHub is configured (now in user, not server)
+        if user.github_token_encrypted and user.github_organization:
+            if progress_label:
+                progress_label.text = 'Preparing GitHub upload...'
+                await asyncio.sleep(0.1)
+
+            github_token = encryption.decrypt(user.github_token_encrypted)
+
+            # Sanitize names for filesystem/GitHub paths
+            def sanitize_name(name):
+                """Remove/replace characters that are problematic for file paths"""
+                import re
+                # Replace problematic characters with underscores or remove them
+                safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
+                # Replace spaces with underscores
+                safe_name = safe_name.replace(' ', '_')
+                # Remove leading/trailing dots and spaces
+                safe_name = safe_name.strip('. ')
+                return safe_name
+
+            # Extract server hostname from URL for repository name
+            # e.g. "https://hagedorn.ninoxdb.de" -> "hagedorn.ninoxdb.de"
+            server_hostname = server.url.replace('https://', '').replace('http://', '').split('/')[0]
+            repo_name = sanitize_name(server_hostname)
 
             # Create GitHub manager
             github_mgr = GitHubManager(
-                token=github_token,
-                organization=server.github_organization,
-                repository=repo_name
+                access_token=github_token,
+                organization=user.github_organization
             )
 
-            # Create path for this database
-            github_path = f'{team.name}/{database.name}'
+            # Step 4: Ensure repository exists
+            if progress_label:
+                progress_label.text = f'Creating/checking repository "{repo_name}"...'
+                await asyncio.sleep(0.1)
 
-            # Convert structure to JSON
+            repo = github_mgr.ensure_repository(
+                repo_name=repo_name,
+                description=f'Ninox database backups from {server.name} ({server.url})'
+            )
+            logger.info(f"Repository ready: {repo_name}")
+
+            # Create path: team/dbname-structure.json (NO server folder, since repo = server)
+            team_name = sanitize_name(team.name)
+            db_name = sanitize_name(database.name)
+
+            github_path = team_name  # Just the team folder
+            file_name = f'{db_name}-structure.json'
+            full_path = f'{github_path}/{file_name}'
+
+            # Step 5: Convert to JSON
+            if progress_label:
+                progress_label.text = 'Converting to JSON format...'
+                await asyncio.sleep(0.1)
+
             structure_json = json.dumps(db_structure, indent=2, ensure_ascii=False)
+            logger.info(f"JSON size: {len(structure_json)} bytes")
 
-            # Upload to GitHub
-            github_mgr.upload_file(
-                file_path=f'{github_path}/structure.json',
+            # Step 6: Upload to GitHub
+            if progress_label:
+                progress_label.text = f'Uploading to GitHub: {full_path}...'
+                await asyncio.sleep(0.1)
+
+            github_mgr.update_file(
+                repo=repo,
+                file_path=full_path,
                 content=structure_json,
-                commit_message=f'Update {database.name} structure'
+                commit_message=f'Update {database.name} structure from {team.name}'
             )
+            logger.info(f"Uploaded to GitHub: {full_path}")
 
-            # Update database record
+            # Step 7: Update database record
+            if progress_label:
+                progress_label.text = 'Updating database record...'
+                await asyncio.sleep(0.1)
+
             db = get_db()
             db_obj = db.query(Database).filter(Database.id == database.id).first()
             db_obj.github_path = github_path
@@ -288,14 +416,18 @@ async def sync_database(user, server, team, database, container):
                 action='database_synced',
                 resource_type='database',
                 resource_id=database.id,
-                details=f'Synced database "{database.name}" to GitHub'
+                details=f'Synced database "{database.name}" to GitHub at {full_path}',
+                auto_commit=True
             )
 
             db.close()
 
-            Toast.success(f'Database "{database.name}" synced to GitHub successfully!')
+            logger.info(f"✓ Sync completed successfully for {database.name}")
+            if not progress_label:  # Only show toast if not using progress dialog
+                Toast.success(f'Database "{database.name}" synced to GitHub successfully!')
         else:
             # Just save structure locally
+            logger.info("GitHub not configured, saving locally...")
             db = get_db()
             db_obj = db.query(Database).filter(Database.id == database.id).first()
             db_obj.last_modified = datetime.utcnow()
@@ -315,44 +447,92 @@ async def sync_database(user, server, team, database, container):
 
             Toast.warning(
                 f'Database "{database.name}" synced, but GitHub is not configured. '
-                'Configure GitHub in server settings to push to repository.'
+                'Configure GitHub in Profile settings to push to repository.'
             )
 
         # Reload databases
         load_databases(user, server, team, container)
 
     except Exception as e:
+        logger.error(f"=== SYNC ERROR === Database: {database.name}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error message: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         Toast.error(f'Error syncing database: {str(e)}')
 
 
-async def sync_all_databases(user, server, team, databases):
-    """Sync all non-excluded databases"""
-    try:
-        Toast.info(f'Syncing all databases for team "{team.name}"...')
+def sync_all_databases(user, server, team, databases):
+    """Sync all non-excluded databases with progress dialog"""
+    import logging
+    logger = logging.getLogger(__name__)
 
-        success_count = 0
-        error_count = 0
+    # Filter non-excluded databases
+    databases_to_sync = [db for db in databases if not db.is_excluded]
+    total_count = len(databases_to_sync)
 
-        for database in databases:
-            if database.is_excluded:
-                continue
+    if total_count == 0:
+        Toast.warning('No databases to sync (all are excluded)')
+        return
 
-            try:
-                await sync_database(user, server, team, database, None)
-                success_count += 1
-            except Exception as e:
-                error_count += 1
-                print(f'Error syncing {database.name}: {e}')
+    # Create progress dialog
+    with ui.dialog() as progress_dialog, ui.card().classes('p-6'):
+        with ui.column().classes('items-center gap-4').style('min-width: 400px;'):
+            ui.spinner(size='xl', color='primary')
+            status_label = ui.label(f'Syncing {total_count} databases...').classes('text-h6 text-center')
+            progress_label = ui.label('Starting...').classes('text-grey-7 text-center')
+            progress_bar = ui.linear_progress(value=0, show_value=True).props('size=20px color=primary')
 
-        if error_count > 0:
-            Toast.warning(
-                f'Synced {success_count} databases with {error_count} errors. Check logs for details.'
-            )
-        else:
-            Toast.success(f'Successfully synced all {success_count} databases!')
+    progress_dialog.open()
 
-    except Exception as e:
-        Toast.error(f'Error during bulk sync: {str(e)}')
+    # Create async task
+    async def run_sync_all():
+        try:
+            success_count = 0
+            error_count = 0
+
+            for idx, database in enumerate(databases_to_sync, 1):
+                try:
+                    logger.info(f"Syncing {idx}/{total_count}: {database.name}")
+
+                    # Update progress
+                    status_label.text = f'Syncing {idx}/{total_count}: {database.name}'
+                    progress_bar.value = (idx - 1) / total_count
+                    await asyncio.sleep(0.1)
+
+                    # Sync the database
+                    await sync_database(user, server, team, database, None, progress_label)
+
+                    success_count += 1
+                    logger.info(f"✓ Success: {database.name}")
+
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"✗ Error syncing {database.name}: {e}")
+                    progress_label.text = f'Error: {database.name}'
+                    await asyncio.sleep(1)
+
+            # Final progress
+            progress_bar.value = 1.0
+            progress_label.text = f'Completed: {success_count} success, {error_count} errors'
+            await asyncio.sleep(1.5)
+            progress_dialog.close()
+
+            # Show result
+            if error_count > 0:
+                Toast.warning(
+                    f'Synced {success_count}/{total_count} databases. {error_count} errors occurred.'
+                )
+            else:
+                Toast.success(f'Successfully synced all {success_count} databases!')
+
+        except Exception as e:
+            logger.error(f"Bulk sync error: {e}")
+            progress_dialog.close()
+            Toast.error(f'Error during bulk sync: {str(e)}')
+
+    # Start background task
+    background_tasks.create(run_sync_all())
 
 
 def toggle_database_exclusion(user, database, is_excluded, container):
@@ -372,7 +552,8 @@ def toggle_database_exclusion(user, database, is_excluded, container):
             action=action,
             resource_type='database',
             resource_id=database.id,
-            details=f'{"Excluded" if is_excluded else "Included"} database: {database.name}'
+            details=f'{"Excluded" if is_excluded else "Included"} database: {database.name}',
+            auto_commit=True
         )
 
         # Get server and team for reload
@@ -417,7 +598,7 @@ def load_sync_history(user, team, container):
                                     with ui.column().classes('gap-1'):
                                         ui.label(log.details).classes('font-medium')
                                         ui.label(
-                                            f'By: {log.user.username}'
+                                            f'User ID: {log.user_id}'
                                         ).classes('text-caption text-grey-7')
                                     with ui.column().classes('gap-1 items-end'):
                                         with ui.row().classes('items-center gap-1'):

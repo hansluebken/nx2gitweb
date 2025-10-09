@@ -238,14 +238,15 @@ async def sync_teams_from_api(user, server, container):
 
         db.commit()
 
-        # Create audit log
+        # Create audit log (with auto_commit since teams already committed)
         create_audit_log(
             db=db,
             user_id=user.id,
             action='teams_synced',
             resource_type='server',
             resource_id=server.id,
-            details=f'Synced {synced_count} teams from server: {server.name}'
+            details=f'Synced {synced_count} teams from server: {server.name}',
+            auto_commit=True
         )
 
         db.close()
@@ -298,15 +299,16 @@ async def sync_databases_for_team(user, server, team, container):
             ).first()
 
             if existing_db:
-                # Update existing database
+                # Update existing database name (keep exclusion status)
                 existing_db.name = db_name
             else:
-                # Create new database
+                # Create new database - EXCLUDED by default for safety
+                # User must manually include databases they want to sync
                 new_db = Database(
                     team_id=team.id,
                     database_id=db_id,
                     name=db_name,
-                    is_excluded=False
+                    is_excluded=True  # Default: excluded (safe default)
                 )
                 db.add(new_db)
 
@@ -318,14 +320,15 @@ async def sync_databases_for_team(user, server, team, container):
 
         db.commit()
 
-        # Create audit log
+        # Create audit log (with auto_commit since databases already committed)
         create_audit_log(
             db=db,
             user_id=user.id,
             action='databases_synced',
             resource_type='team',
             resource_id=team.id,
-            details=f'Synced {synced_count} databases for team: {team.name}'
+            details=f'Synced {synced_count} databases for team: {team.name}',
+            auto_commit=True
         )
 
         db.close()
@@ -348,7 +351,7 @@ def toggle_team_status(user, team, is_active, container):
         team_obj.is_active = is_active
         db.commit()
 
-        # Create audit log
+        # Create audit log (with auto_commit since team already committed)
         action = 'team_activated' if is_active else 'team_deactivated'
         create_audit_log(
             db=db,
@@ -356,7 +359,8 @@ def toggle_team_status(user, team, is_active, container):
             action=action,
             resource_type='team',
             resource_id=team.id,
-            details=f'{"Activated" if is_active else "Deactivated"} team: {team.name}'
+            details=f'{"Activated" if is_active else "Deactivated"} team: {team.name}',
+            auto_commit=True
         )
 
         db.close()

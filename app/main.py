@@ -10,7 +10,8 @@ from contextlib import asynccontextmanager
 
 from .database import init_db, get_db
 from .auth import create_admin_user, get_user_from_token, InvalidTokenError
-from .ui import login, dashboard, servers, teams, sync, admin, profile
+from .ui import login, dashboard, servers, teams, sync, admin, profile, cronjobs
+from .services.cronjob_scheduler import get_scheduler
 
 # Configure logging
 logging.basicConfig(
@@ -237,6 +238,27 @@ def profile_page():
     profile.render(user)
 
 
+@ui.page('/cronjobs')
+def cronjobs_page():
+    """Cronjob management page"""
+    token = app.storage.user.get(SESSION_TOKEN_KEY)
+    if not token:
+        ui.navigate.to('/login')
+        return
+
+    try:
+        db = get_db()
+        user = get_user_from_token(db, token)
+        db.close()
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        app.storage.user.pop(SESSION_TOKEN_KEY, None)
+        ui.navigate.to('/login')
+        return
+
+    cronjobs.render(user)
+
+
 @ui.page('/logout')
 def logout_page():
     """Logout and redirect to login"""
@@ -281,18 +303,30 @@ def init_app():
         raise
 
 
+async def startup_scheduler():
+    """Start the cronjob scheduler on app startup"""
+    logger.info("🚀 Starting cronjob scheduler...")
+    scheduler = get_scheduler()
+    import asyncio
+    asyncio.create_task(scheduler.start())
+    logger.info("✓ Cronjob scheduler task created")
+
+
 def main():
     """Main application entry point"""
     try:
         # Initialize application
         init_app()
 
+        # Register startup handler for scheduler
+        app.on_startup(startup_scheduler)
+
         # Configure NiceGUI
         ui.run(
             title=APP_TITLE,
             host=APP_HOST,
             port=APP_PORT,
-            reload=False,
+            reload=False,  # Disabled to prevent connection loss during operations
             show=False,
             storage_secret=os.getenv('SESSION_SECRET', 'change-this-secret-in-production')
         )

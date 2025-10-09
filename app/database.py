@@ -24,7 +24,14 @@ engine = create_engine(
 )
 
 # Session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# expire_on_commit=False prevents "Instance not bound to Session" errors
+# when accessing attributes after commit
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+    expire_on_commit=False
+)
 
 
 # Enable foreign key constraints for SQLite (if used for testing)

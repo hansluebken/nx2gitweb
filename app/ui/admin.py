@@ -114,7 +114,7 @@ def render_overview(user):
                                     ui.label(log.details or 'No details').classes(
                                         'text-caption text-grey-7'
                                     )
-                                    ui.label(f'By: {log.user.username}').classes(
+                                    ui.label(f'User ID: {log.user_id}').classes(
                                         'text-caption text-grey-7'
                                     )
                                 ui.label(format_datetime(log.created_at)).classes(
@@ -289,7 +289,8 @@ def show_add_user_dialog(admin_user, container):
                     action='user_created_by_admin',
                     resource_type='user',
                     resource_id=new_user.id,
-                    details=f'Admin created user: {username}'
+                    details=f'Admin created user: {username}',
+                    auto_commit=True
                 )
 
                 db.close()
@@ -362,7 +363,8 @@ def confirm_delete_user(admin_user, user, container):
                 action='user_deleted',
                 resource_type='user',
                 resource_id=user.id,
-                details=f'Deleted user: {user.username}'
+                details=f'Deleted user: {user.username}',
+                auto_commit=True
             )
 
             # Delete user (cascades to servers, teams, etc.)
@@ -447,7 +449,7 @@ def render_audit_logs(user):
                                         ui.label(log.details or 'No details').classes(
                                             'text-grey-7'
                                         )
-                                        ui.label(f'User: {log.user.username}').classes(
+                                        ui.label(f'User ID: {log.user_id}').classes(
                                             'text-caption text-grey-7'
                                         )
                                         if log.ip_address:

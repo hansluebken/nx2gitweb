@@ -45,6 +45,7 @@ class NavHeader:
                 self._nav_link('Servers', '/servers', 'storage')
                 self._nav_link('Teams', '/teams', 'group')
                 self._nav_link('Sync', '/sync', 'sync')
+                self._nav_link('Cronjobs', '/cronjobs', 'schedule')
 
                 if self.user.is_admin:
                     self._nav_link('Admin', '/admin', 'admin_panel_settings')

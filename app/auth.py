@@ -159,13 +159,14 @@ def create_audit_log(
     resource_id: Optional[int] = None,
     details: Optional[str] = None,
     ip_address: Optional[str] = None,
-    user_agent: Optional[str] = None
+    user_agent: Optional[str] = None,
+    auto_commit: bool = False
 ) -> AuditLog:
     """
     Create audit log entry
 
     Args:
-        db: Database session
+        db: Database session (can be None if auto_commit=True, will create own session)
         user_id: User ID
         action: Action performed (e.g., 'login', 'logout', 'password_reset_request')
         resource_type: Type of resource affected
@@ -173,23 +174,45 @@ def create_audit_log(
         details: Additional details
         ip_address: Client IP address
         user_agent: Client user agent
+        auto_commit: If True, creates own session and commits. If False (default),
+                     uses provided session and caller must commit.
 
     Returns:
         Created AuditLog object
     """
-    audit_log = AuditLog(
-        user_id=user_id,
-        action=action,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        details=details,
-        ip_address=ip_address,
-        user_agent=user_agent
-    )
-    db.add(audit_log)
-    db.commit()
-    db.refresh(audit_log)
-    return audit_log
+    # If auto_commit, use a separate session to avoid conflicts
+    if auto_commit:
+        from .database import get_db
+        own_db = get_db()
+        try:
+            audit_log = AuditLog(
+                user_id=user_id,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                details=details,
+                ip_address=ip_address,
+                user_agent=user_agent
+            )
+            own_db.add(audit_log)
+            own_db.commit()
+            own_db.close()
+            return audit_log
+        finally:
+            own_db.close()
+    else:
+        # Use provided session
+        audit_log = AuditLog(
+            user_id=user_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            details=details,
+            ip_address=ip_address,
+            user_agent=user_agent
+        )
+        db.add(audit_log)
+        return audit_log
 
 
 def register_user(
@@ -260,9 +283,9 @@ def register_user(
 
     db.add(user)
     db.commit()
-    db.refresh(user)
+    # Note: db.refresh() removed - user.id is already available after commit
 
-    # Create audit log
+    # Create audit log (with auto_commit since user already committed)
     create_audit_log(
         db=db,
         user_id=user.id,
@@ -271,7 +294,8 @@ def register_user(
         resource_id=user.id,
         details=f"User {username} registered",
         ip_address=ip_address,
-        user_agent=user_agent
+        user_agent=user_agent,
+        auto_commit=True
     )
 
     return user
@@ -285,94 +309,89 @@ def login_user(
     user_agent: Optional[str] = None
 ) -> tuple[UserDTO, str]:
     """
-    Login user and generate JWT token
-
-    Args:
-        db: Database session
-        username_or_email: Username or email
-        password: Plain text password
-        ip_address: Client IP address
-        user_agent: Client user agent
-
-    Returns:
-        Tuple of (UserDTO object, JWT token)
-
-    Raises:
-        InvalidCredentialsError: If credentials are invalid
-        InactiveUserError: If user account is inactive
+    Login user and generate JWT token - SIMPLIFIED VERSION FOR DEBUGGING
     """
-    # Find user by username or email
-    user = db.query(User).filter(
-        or_(User.username == username_or_email, User.email == username_or_email)
-    ).first()
+    import logging
+    logger = logging.getLogger(__name__)
 
-    if not user:
-        raise InvalidCredentialsError("Invalid username/email or password")
+    try:
+        logger.info("=== LOGIN START ===")
 
-    # Verify password
-    if not verify_password(password, user.password_hash):
-        # Log failed login attempt
-        create_audit_log(
-            db=db,
-            user_id=user.id,
-            action='login_failed',
-            details=f"Failed login attempt for user {user.username}",
-            ip_address=ip_address,
-            user_agent=user_agent
+        # Find user by username or email
+        user = db.query(User).filter(
+            or_(User.username == username_or_email, User.email == username_or_email)
+        ).first()
+        logger.info(f"Step 1: Found user")
+
+        if not user:
+            raise InvalidCredentialsError("Invalid username/email or password")
+
+        # Capture IMMEDIATELY after query
+        user_id = user.id
+        logger.info(f"Step 2: Captured user_id={user_id}")
+
+        username = user.username
+        logger.info(f"Step 3: Captured username={username}")
+
+        email = user.email
+        full_name = user.full_name
+        is_admin = user.is_admin
+        is_active = user.is_active
+        password_hash = user.password_hash
+        github_token_encrypted = user.github_token_encrypted
+        github_organization = user.github_organization
+        github_default_repo = user.github_default_repo
+        logger.info(f"Step 4: ALL attributes captured")
+
+        # Verify password
+        if not verify_password(password, password_hash):
+            raise InvalidCredentialsError("Invalid username/email or password")
+        logger.info(f"Step 5: Password verified")
+
+        if not is_active:
+            raise InactiveUserError("User account is inactive")
+        logger.info(f"Step 6: Active check passed")
+
+        # DONT touch user object anymore! Just commit
+        last_login_time = datetime.utcnow()
+        logger.info(f"Step 7: About to update last_login - user object state: {db.is_modified(user)}")
+
+        user.last_login = last_login_time
+        logger.info(f"Step 8: Set last_login")
+
+        # NO audit log for now - just commit
+        logger.info(f"Step 9: About to commit")
+        db.commit()
+        logger.info(f"Step 10: COMMITTED - user is now detached")
+
+        # Create DTO from captured values
+        user_dto = UserDTO(
+            id=user_id,
+            username=username,
+            email=email,
+            full_name=full_name,
+            is_admin=is_admin,
+            is_active=is_active,
+            last_login=last_login_time,
+            github_token_encrypted=github_token_encrypted,
+            github_organization=github_organization,
+            github_default_repo=github_default_repo
         )
-        raise InvalidCredentialsError("Invalid username/email or password")
+        logger.info(f"Step 11: Created UserDTO")
 
-    # Check if user is active
-    if not user.is_active:
-        raise InactiveUserError("User account is inactive")
+        # Generate token
+        token = generate_jwt_token(user_dto)
+        logger.info(f"Step 12: Generated token")
 
-    # Capture all user data BEFORE any database operations
-    user_id = user.id
-    username = user.username
-    email = user.email
-    full_name = user.full_name
-    is_admin = user.is_admin
-    is_active = user.is_active
-    github_token_encrypted = user.github_token_encrypted
-    github_organization = user.github_organization
-    github_default_repo = user.github_default_repo
+        logger.info(f"Step 13: About to return")
+        return user_dto, token
 
-    # Update last login time
-    last_login_time = datetime.utcnow()
-    user.last_login = last_login_time
-
-    # Create audit log BEFORE committing (while user is still attached)
-    # We need to add the audit log entry but not commit it yet
-    audit_log = AuditLog(
-        user_id=user_id,
-        action='login',
-        details=f"User {username} logged in",
-        ip_address=ip_address,
-        user_agent=user_agent
-    )
-    db.add(audit_log)
-
-    # Now commit everything together
-    db.commit()
-
-    # Create UserDTO directly from captured values
-    user_dto = UserDTO(
-        id=user_id,
-        username=username,
-        email=email,
-        full_name=full_name,
-        is_admin=is_admin,
-        is_active=is_active,
-        last_login=last_login_time,
-        github_token_encrypted=github_token_encrypted,
-        github_organization=github_organization,
-        github_default_repo=github_default_repo
-    )
-
-    # Generate JWT token using the DTO
-    token = generate_jwt_token(user_dto)
-
-    return user_dto, token
+    except Exception as e:
+        logger.error(f"EXCEPTION in login_user: {type(e).__name__}")
+        logger.error(f"Exception args: {e.args}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise
 
 
 def logout_user(
@@ -395,13 +414,16 @@ def logout_user(
     """
     user = db.query(User).filter(User.id == user_id).first()
     if user:
+        # Capture username BEFORE auto_commit
+        username = user.username
         create_audit_log(
             db=db,
             user_id=user_id,
             action='logout',
-            details=f"User {user.username} logged out",
+            details=f"User {username} logged out",
             ip_address=ip_address,
-            user_agent=user_agent
+            user_agent=user_agent,
+            auto_commit=True
         )
 
 
@@ -466,25 +488,30 @@ def generate_password_reset_token(
     if not user:
         raise UserNotFoundError("User not found")
 
+    # Capture user data BEFORE commit
+    user_id = user.id
+    user_email = user.email
+
     # Generate secure random token
     token = secrets.token_urlsafe(32)
 
     # Create password reset record
     password_reset = PasswordReset(
-        user_id=user.id,
+        user_id=user_id,
         token=token
     )
     db.add(password_reset)
     db.commit()
 
-    # Create audit log
+    # Create audit log (with auto_commit since password_reset already committed)
     create_audit_log(
         db=db,
-        user_id=user.id,
+        user_id=user_id,
         action='password_reset_request',
-        details=f"Password reset requested for {user.email}",
+        details=f"Password reset requested for {user_email}",
         ip_address=ip_address,
-        user_agent=user_agent
+        user_agent=user_agent,
+        auto_commit=True
     )
 
     return user, token
@@ -556,6 +583,10 @@ def reset_password(
     if not user:
         raise UserNotFoundError("User not found")
 
+    # Capture user data BEFORE commit
+    user_id = user.id
+    user_email = user.email
+
     # Update password
     user.password_hash = hash_password(new_password)
 
@@ -565,14 +596,15 @@ def reset_password(
 
     db.commit()
 
-    # Create audit log
+    # Create audit log (with auto_commit since password already committed)
     create_audit_log(
         db=db,
-        user_id=user.id,
+        user_id=user_id,
         action='password_reset',
-        details=f"Password reset for {user.email}",
+        details=f"Password reset for {user_email}",
         ip_address=ip_address,
-        user_agent=user_agent
+        user_agent=user_agent,
+        auto_commit=True
     )
 
     return user
@@ -610,6 +642,9 @@ def change_password(
     if not user:
         raise UserNotFoundError("User not found")
 
+    # Capture user data BEFORE commit
+    username = user.username
+
     # Verify current password
     if not verify_password(current_password, user.password_hash):
         raise InvalidCredentialsError("Current password is incorrect")
@@ -623,14 +658,15 @@ def change_password(
     user.password_hash = hash_password(new_password)
     db.commit()
 
-    # Create audit log
+    # Create audit log (with auto_commit since password already committed)
     create_audit_log(
         db=db,
-        user_id=user.id,
+        user_id=user_id,
         action='password_changed',
-        details=f"Password changed for {user.username}",
+        details=f"Password changed for {username}",
         ip_address=ip_address,
-        user_agent=user_agent
+        user_agent=user_agent,
+        auto_commit=True
     )
 
     return user
@@ -668,16 +704,17 @@ def create_admin_user(db: Session) -> User:
 
     db.add(admin_user)
     db.commit()
-    db.refresh(admin_user)
+    # Note: db.refresh() removed - admin_user.id is already available after commit
 
-    # Create audit log
+    # Create audit log (with auto_commit since admin_user already committed)
     create_audit_log(
         db=db,
         user_id=admin_user.id,
         action='admin_user_created',
         resource_type='user',
         resource_id=admin_user.id,
-        details='Default admin user created'
+        details='Default admin user created',
+        auto_commit=True
     )
 
     print(f"Admin user created: username='user500', password='Quaternion1234____'")
@@ -733,20 +770,25 @@ def deactivate_user(
     if not user:
         raise UserNotFoundError("User not found")
 
+    # Capture usernames BEFORE commit
+    username = user.username
+    admin_username = admin_user.username
+
     # Deactivate user
     user.is_active = False
     db.commit()
 
-    # Create audit log
+    # Create audit log (with auto_commit since user already committed)
     create_audit_log(
         db=db,
         user_id=admin_user_id,
         action='user_deactivated',
         resource_type='user',
         resource_id=user.id,
-        details=f"User {user.username} deactivated by admin {admin_user.username}",
+        details=f"User {username} deactivated by admin {admin_username}",
         ip_address=ip_address,
-        user_agent=user_agent
+        user_agent=user_agent,
+        auto_commit=True
     )
 
     return user
@@ -787,20 +829,25 @@ def activate_user(
     if not user:
         raise UserNotFoundError("User not found")
 
+    # Capture usernames BEFORE commit
+    username = user.username
+    admin_username = admin_user.username
+
     # Activate user
     user.is_active = True
     db.commit()
 
-    # Create audit log
+    # Create audit log (with auto_commit since user already committed)
     create_audit_log(
         db=db,
         user_id=admin_user_id,
         action='user_activated',
         resource_type='user',
         resource_id=user.id,
-        details=f"User {user.username} activated by admin {admin_user.username}",
+        details=f"User {username} activated by admin {admin_username}",
         ip_address=ip_address,
-        user_agent=user_agent
+        user_agent=user_agent,
+        auto_commit=True
     )
 
     return user

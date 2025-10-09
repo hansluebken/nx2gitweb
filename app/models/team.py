@@ -30,6 +30,11 @@ class Team(Base, TimestampMixin):
         back_populates="team",
         cascade="all, delete-orphan"
     )
+    cronjobs: Mapped[List["Cronjob"]] = relationship(
+        "Cronjob",
+        back_populates="team",
+        cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Team(name='{self.name}', team_id='{self.team_id}', server_id={self.server_id})>"

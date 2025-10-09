@@ -170,7 +170,8 @@ def render_github_settings(user):
                         action='github_config_updated',
                         resource_type='user',
                         resource_id=user.id,
-                        details='Updated GitHub configuration'
+                        details='Updated GitHub configuration',
+                        auto_commit=True
                     )
 
                     db.close()

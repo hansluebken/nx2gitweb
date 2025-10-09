@@ -74,8 +74,13 @@ def render_login_form():
 
         async def handle_login():
             """Handle login submission"""
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info("=== HANDLE_LOGIN CALLED ===")
+
             username = username_input.value.strip()
             password = password_input.value
+            logger.info(f"Username: {username}, Password length: {len(password)}")
 
             # Validate inputs
             if not username or not password:
@@ -87,8 +92,11 @@ def render_login_form():
 
             db = None
             try:
+                logger.info("Getting DB session...")
                 db = get_db()
+                logger.info("Calling login_user...")
                 user, token = login_user(db, username, password)
+                logger.info(f"login_user returned successfully")
 
                 # UserDTO has all attributes already loaded
                 user_display_name = user.full_name or user.username
@@ -109,7 +117,16 @@ def render_login_form():
                 error_label.text = 'Your account has been deactivated. Please contact an administrator.'
                 error_label.visible = True
             except Exception as e:
-                error_label.text = f'Login failed: {str(e)}'
+                import traceback
+                import logging
+                logger = logging.getLogger(__name__)
+                try:
+                    error_msg = str(e)
+                except:
+                    error_msg = f"{type(e).__name__} (details unavailable)"
+                logger.error(f"Login error: {type(e).__name__}: {error_msg}")
+                logger.error(traceback.format_exc())
+                error_label.text = f'Login failed: {error_msg}'
                 error_label.visible = True
             finally:
                 if db:

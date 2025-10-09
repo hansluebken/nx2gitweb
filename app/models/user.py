@@ -50,4 +50,9 @@ class User(Base, TimestampMixin):
     )
 
     def __repr__(self) -> str:
-        return f"<User(username='{self.username}', email='{self.email}', is_admin={self.is_admin})>"
+        try:
+            # Try to access attributes, but handle detached instance gracefully
+            return f"<User(username='{self.username}', email='{self.email}', is_admin={self.is_admin})>"
+        except:
+            # If detached from session, just show the object ID
+            return f"<User(id={getattr(self, 'id', 'unknown')})>"

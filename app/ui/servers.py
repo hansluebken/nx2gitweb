@@ -187,14 +187,15 @@ def show_add_server_dialog(user):
                 db.add(server)
                 db.commit()
 
-                # Create audit log
+                # Create audit log (with auto_commit since server already committed)
                 create_audit_log(
                     db=db,
                     user_id=user.id,
                     action='server_created',
                     resource_type='server',
                     resource_id=server.id,
-                    details=f'Created server: {name}'
+                    details=f'Created server: {name}',
+                    auto_commit=True
                 )
 
                 db.close()
@@ -284,14 +285,15 @@ def show_edit_server_dialog(user, server, container):
                 db_server.is_active = is_active
                 db.commit()
 
-                # Create audit log
+                # Create audit log (with auto_commit since server already committed)
                 create_audit_log(
                     db=db,
                     user_id=user.id,
                     action='server_updated',
                     resource_type='server',
                     resource_id=server.id,
-                    details=f'Updated server: {name}'
+                    details=f'Updated server: {name}',
+                    auto_commit=True
                 )
 
                 db.close()
@@ -319,14 +321,15 @@ def confirm_delete_server(user, server, container):
         try:
             db = get_db()
 
-            # Create audit log before deletion
+            # Create audit log before deletion (no auto_commit, will commit after deletion)
             create_audit_log(
                 db=db,
                 user_id=user.id,
                 action='server_deleted',
                 resource_type='server',
                 resource_id=server.id,
-                details=f'Deleted server: {server.name}'
+                details=f'Deleted server: {server.name}',
+                auto_commit=False
             )
 
             # Delete server (cascades to teams and databases)

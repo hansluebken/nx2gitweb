@@ -54,6 +54,7 @@ services:
       SESSION_SECRET: ${SECRET_KEY}
 
     volumes:
+      - ./app:/app/app  # Mount app code for live updates
       - ./data/keys:/app/data/keys
       - ./data/logs:/app/data/logs
     # ports:
