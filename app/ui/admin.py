@@ -78,7 +78,7 @@ def render_smtp_config(user):
             ui.button(
                 'Add SMTP Server',
                 icon='add',
-                on_click=lambda: show_smtp_add_dialog(user)
+                on_click=lambda: show_smtp_add_dialog(user, smtp_container)
             ).props('color=primary')
 
         # SMTP servers list container
@@ -86,10 +86,10 @@ def render_smtp_config(user):
         load_smtp_configs(user, smtp_container)
 
 
-def show_smtp_add_dialog(user):
+def show_smtp_add_dialog(user, container):
     """Show dialog to add SMTP configuration"""
     from .smtp_config import show_add_smtp_dialog
-    show_add_smtp_dialog(user)
+    show_add_smtp_dialog(user, container)
 
 
 def render_overview(user):

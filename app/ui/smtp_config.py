@@ -43,7 +43,7 @@ def render(user):
             ui.button(
                 'Add SMTP Server',
                 icon='add',
-                on_click=lambda: show_add_smtp_dialog(user)
+                on_click=lambda: show_add_smtp_dialog(user, smtp_container)
             ).props('color=primary')
 
         # SMTP servers list container
@@ -102,7 +102,11 @@ def render_smtp_card(user, config, container):
 
                 if config.last_test_date:
                     with ui.row().classes('gap-2 items-center'):
-                        ui.label(f'Last tested: {format_datetime(config.last_test_date)}').classes('text-caption text-grey-7')
+                        # Make datetime timezone-naive if it has timezone info
+                        test_date = config.last_test_date
+                        if hasattr(test_date, 'tzinfo') and test_date.tzinfo is not None:
+                            test_date = test_date.replace(tzinfo=None)
+                        ui.label(f'Last tested: {format_datetime(test_date)}').classes('text-caption text-grey-7')
                         if config.last_test_result:
                             if 'success' in config.last_test_result.lower():
                                 ui.icon('check', size='xs').classes('text-positive')
@@ -137,7 +141,7 @@ def render_smtp_card(user, config, container):
                 ).props('flat dense color=negative')
 
 
-def show_add_smtp_dialog(user):
+def show_add_smtp_dialog(user, container=None):
     """Show dialog to add a new SMTP configuration"""
     with ui.dialog() as dialog, ui.card().classes('w-full p-6').style('min-width: 600px;'):
         ui.label('Add SMTP Server').classes('text-h5 font-bold mb-4')
@@ -261,8 +265,8 @@ def show_add_smtp_dialog(user):
                 Toast.success(f'SMTP configuration "{name}" created successfully!')
                 dialog.close()
 
-                # Reload the page to show new config
-                ui.navigate.to('/admin/smtp')
+                # Reload the SMTP configs list
+                load_smtp_configs(user, container)
 
             except Exception as e:
                 error_label.text = f'Error creating configuration: {str(e)}'
