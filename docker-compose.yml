@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nx2git-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nx2git}
+      POSTGRES_USER: ${POSTGRES_USER:-nx2git}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - ./data/database:/var/lib/postgresql/data
+    networks:
+      - nx2git-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nx2git}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  webapp:
+    build: .
+    container_name: nx2git-webapp
+    environment:
+      # Database
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nx2git}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-nx2git}
+
+      # Security
+      SECRET_KEY: ${SECRET_KEY}
+      ENCRYPTION_KEY_PATH: /app/data/keys/encryption.key
+
+      # JWT
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRATION_HOURS: ${JWT_EXPIRATION_HOURS:-24}
+
+      # SMTP
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
+
+      # Application
+      APP_NAME: Ninox2Git WebApp
+      APP_URL: https://nx2git.netz-fabrik.net
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+
+      # NiceGUI
+      NICEGUI_PORT: 8765
+
+    volumes:
+      - ./data/keys:/app/data/keys
+      - ./data/logs:/app/data/logs
+    networks:
+      - nx2git-internal
+      - proxy-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      # Labels für NGINX Proxy Manager
+      - "com.nginx-proxy.enable=true"
+      - "com.nginx-proxy.host=nx2git.netz-fabrik.net"
+      - "com.nginx-proxy.port=8765"
+    restart: unless-stopped
+
+networks:
+  nx2git-internal:
+    driver: bridge
+  proxy-network:
+    external: true

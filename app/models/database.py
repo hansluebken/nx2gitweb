@@ -1,0 +1,30 @@
+"""
+Database model for Ninox databases
+"""
+from datetime import datetime
+from sqlalchemy import String, Boolean, Integer, ForeignKey, DateTime
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from .base import Base, TimestampMixin
+
+
+class Database(Base, TimestampMixin):
+    """Ninox Database model"""
+    __tablename__ = "databases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), nullable=False, index=True)
+
+    # Database details
+    database_id: Mapped[str] = mapped_column(String(255), nullable=False)  # Ninox database ID
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    github_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Status
+    is_excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_modified: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Relationships
+    team: Mapped["Team"] = relationship("Team", back_populates="databases")
+
+    def __repr__(self) -> str:
+        return f"<Database(name='{self.name}', database_id='{self.database_id}', team_id={self.team_id})>"
