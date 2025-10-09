@@ -1,6 +1,7 @@
 """
 Team management page for Ninox2Git
 """
+import asyncio
 from nicegui import ui
 from datetime import datetime
 from ..database import get_db
@@ -183,163 +184,307 @@ def render_team_card(user, server, team, container):
                     ).props('flat dense color=positive')
 
 
-async def sync_teams_from_api(user, server, container):
-    """Sync teams from Ninox API"""
-    try:
-        # Show loading message
-        Toast.info('Syncing teams from Ninox...')
+def sync_teams_from_api(user, server, container):
+    """Sync teams from Ninox API with progress dialog"""
+    # Create progress dialog
+    with ui.dialog() as dialog, ui.card().classes('w-96 p-6'):
+        with ui.column().classes('w-full gap-4'):
+            ui.label('Syncing Teams').classes('text-h6 font-bold')
 
-        # Decrypt API key
-        encryption = get_encryption_manager()
-        api_key = encryption.decrypt(server.api_key_encrypted)
+            # Progress message
+            progress_msg = ui.label('Connecting to Ninox API...').classes('text-grey-8')
 
-        # Create Ninox client
-        client = NinoxClient(server.url, api_key)
+            # Spinner
+            with ui.row().classes('w-full justify-center my-4'):
+                ui.spinner(size='lg', color='primary')
 
-        # Fetch teams from API
-        teams_data = client.get_teams()
+            # Status details
+            status_container = ui.column().classes('w-full gap-2')
 
-        if not teams_data:
-            Toast.warning('No teams found on server')
-            return
+    dialog.open()
 
-        # Save teams to database
-        db = get_db()
-        synced_count = 0
+    async def execute_sync():
+        """Execute team sync in background without blocking UI"""
+        try:
+            # Update status
+            progress_msg.set_text('Decrypting API credentials...')
+            await asyncio.sleep(0.1)  # Allow UI to update
 
-        for team_data in teams_data:
-            # Extract team ID and name
-            team_id = team_data.get('id') or team_data.get('teamId')
-            team_name = team_data.get('name') or team_data.get('teamName', f'Team {team_id}')
+            # Decrypt API key
+            encryption = get_encryption_manager()
+            api_key = encryption.decrypt(server.api_key_encrypted)
 
-            if not team_id:
-                continue
+            progress_msg.set_text('Connecting to Ninox server...')
+            await asyncio.sleep(0.1)
 
-            # Check if team already exists
-            existing_team = db.query(Team).filter(
-                Team.server_id == server.id,
-                Team.team_id == team_id
-            ).first()
+            # Create Ninox client
+            client = NinoxClient(server.url, api_key)
 
-            if existing_team:
-                # Update existing team
-                existing_team.name = team_name
-            else:
-                # Create new team
-                new_team = Team(
-                    server_id=server.id,
-                    team_id=team_id,
-                    name=team_name,
-                    is_active=True
-                )
-                db.add(new_team)
+            progress_msg.set_text('Fetching teams from API...')
+            await asyncio.sleep(0.1)
 
-            synced_count += 1
+            # Fetch teams from API in thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            teams_data = await loop.run_in_executor(None, client.get_teams)
 
-        db.commit()
+            if not teams_data:
+                progress_msg.set_text('No teams found on server')
+                with status_container:
+                    ui.label('⚠️ No teams available').classes('text-orange')
+                await asyncio.sleep(2)
+                dialog.close()
+                return
 
-        # Create audit log (with auto_commit since teams already committed)
-        create_audit_log(
-            db=db,
-            user_id=user.id,
-            action='teams_synced',
-            resource_type='server',
-            resource_id=server.id,
-            details=f'Synced {synced_count} teams from server: {server.name}',
-            auto_commit=True
-        )
+            progress_msg.set_text(f'Found {len(teams_data)} teams. Saving to database...')
+            await asyncio.sleep(0.1)
 
-        db.close()
+            # Save teams to database in thread pool
+            async def save_teams():
+                db = get_db()
+                synced_count = 0
 
-        Toast.success(f'Successfully synced {synced_count} teams!')
+                try:
+                    for idx, team_data in enumerate(teams_data, 1):
+                        # Update progress
+                        progress_msg.set_text(f'Processing team {idx}/{len(teams_data)}...')
 
-        # Reload teams
-        load_teams(user, server, container)
+                        # Extract team ID and name
+                        team_id = team_data.get('id') or team_data.get('teamId')
+                        team_name = team_data.get('name') or team_data.get('teamName', f'Team {team_id}')
 
-    except Exception as e:
-        Toast.error(f'Error syncing teams: {str(e)}')
+                        if not team_id:
+                            continue
+
+                        # Check if team already exists
+                        existing_team = db.query(Team).filter(
+                            Team.server_id == server.id,
+                            Team.team_id == team_id
+                        ).first()
+
+                        if existing_team:
+                            # Update existing team
+                            existing_team.name = team_name
+                            with status_container:
+                                ui.label(f'✓ Updated: {team_name}').classes('text-positive text-sm')
+                        else:
+                            # Create new team
+                            new_team = Team(
+                                server_id=server.id,
+                                team_id=team_id,
+                                name=team_name,
+                                is_active=True
+                            )
+                            db.add(new_team)
+                            with status_container:
+                                ui.label(f'+ Created: {team_name}').classes('text-primary text-sm')
+
+                        synced_count += 1
+                        await asyncio.sleep(0.05)  # Small delay for UI updates
+
+                    db.commit()
+
+                    # Create audit log
+                    create_audit_log(
+                        db=db,
+                        user_id=user.id,
+                        action='teams_synced',
+                        resource_type='server',
+                        resource_id=server.id,
+                        details=f'Synced {synced_count} teams from server: {server.name}',
+                        auto_commit=True
+                    )
+
+                    return synced_count
+
+                finally:
+                    db.close()
+
+            synced_count = await loop.run_in_executor(None, asyncio.run, save_teams())
+
+            progress_msg.set_text(f'✓ Successfully synced {synced_count} teams!')
+            progress_msg.classes('text-positive font-bold')
+
+            # Reload teams
+            load_teams(user, server, container)
+
+            # Close dialog after short delay
+            await asyncio.sleep(2)
+            dialog.close()
+
+        except Exception as e:
+            progress_msg.set_text(f'❌ Error: {str(e)}')
+            progress_msg.classes('text-negative')
+            Toast.error(f'Error syncing teams: {str(e)}')
+
+            # Close dialog after showing error
+            await asyncio.sleep(3)
+            dialog.close()
+
+    # Execute sync in background without blocking UI
+    asyncio.create_task(execute_sync())
 
 
-async def sync_databases_for_team(user, server, team, container):
-    """Sync databases for a specific team"""
-    try:
-        # Show loading message
-        Toast.info(f'Syncing databases for team "{team.name}"...')
+def sync_databases_for_team(user, server, team, container):
+    """Sync databases for a specific team with progress dialog"""
+    # Create progress dialog
+    with ui.dialog() as dialog, ui.card().classes('w-96 p-6'):
+        with ui.column().classes('w-full gap-4'):
+            ui.label(f'Syncing Databases for {team.name}').classes('text-h6 font-bold')
 
-        # Decrypt API key
-        encryption = get_encryption_manager()
-        api_key = encryption.decrypt(server.api_key_encrypted)
+            # Progress message
+            progress_msg = ui.label('Connecting to Ninox API...').classes('text-grey-8')
 
-        # Create Ninox client
-        client = NinoxClient(server.url, api_key)
+            # Spinner
+            with ui.row().classes('w-full justify-center my-4'):
+                ui.spinner(size='lg', color='primary')
 
-        # Fetch databases from API
-        databases_data = client.get_databases(team.team_id)
+            # Status details
+            status_container = ui.column().classes('w-full gap-2')
 
-        if not databases_data:
-            Toast.warning('No databases found for this team')
-            return
+            # Summary section (initially hidden)
+            summary_container = ui.column().classes('w-full gap-2 mt-4')
 
-        # Save databases to database
-        db = get_db()
-        synced_count = 0
+    dialog.open()
 
-        for db_data in databases_data:
-            # Extract database ID and name
-            db_id = db_data.get('id') or db_data.get('databaseId')
-            db_name = db_data.get('name') or db_data.get('databaseName', f'Database {db_id}')
+    async def execute_sync():
+        """Execute database sync in background without blocking UI"""
+        try:
+            # Update status
+            progress_msg.set_text('Decrypting API credentials...')
+            await asyncio.sleep(0.1)  # Allow UI to update
 
-            if not db_id:
-                continue
+            # Decrypt API key
+            encryption = get_encryption_manager()
+            api_key = encryption.decrypt(server.api_key_encrypted)
 
-            # Check if database already exists
-            existing_db = db.query(Database).filter(
-                Database.team_id == team.id,
-                Database.database_id == db_id
-            ).first()
+            progress_msg.set_text('Connecting to Ninox server...')
+            await asyncio.sleep(0.1)
 
-            if existing_db:
-                # Update existing database name (keep exclusion status)
-                existing_db.name = db_name
-            else:
-                # Create new database - EXCLUDED by default for safety
-                # User must manually include databases they want to sync
-                new_db = Database(
-                    team_id=team.id,
-                    database_id=db_id,
-                    name=db_name,
-                    is_excluded=True  # Default: excluded (safe default)
-                )
-                db.add(new_db)
+            # Create Ninox client
+            client = NinoxClient(server.url, api_key)
 
-            synced_count += 1
+            progress_msg.set_text(f'Fetching databases for team "{team.name}"...')
+            await asyncio.sleep(0.1)
 
-        # Update team last sync time
-        team_obj = db.query(Team).filter(Team.id == team.id).first()
-        team_obj.last_sync = datetime.utcnow()
+            # Fetch databases from API in thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            databases_data = await loop.run_in_executor(None, client.get_databases, team.team_id)
 
-        db.commit()
+            if not databases_data:
+                progress_msg.set_text('No databases found for this team')
+                with status_container:
+                    ui.label('⚠️ No databases available').classes('text-orange')
+                await asyncio.sleep(2)
+                dialog.close()
+                return
 
-        # Create audit log (with auto_commit since databases already committed)
-        create_audit_log(
-            db=db,
-            user_id=user.id,
-            action='databases_synced',
-            resource_type='team',
-            resource_id=team.id,
-            details=f'Synced {synced_count} databases for team: {team.name}',
-            auto_commit=True
-        )
+            progress_msg.set_text(f'Found {len(databases_data)} databases. Saving to database...')
+            await asyncio.sleep(0.1)
 
-        db.close()
+            # Save databases to database in thread pool
+            async def save_databases():
+                db = get_db()
+                synced_count = 0
+                new_count = 0
+                updated_count = 0
 
-        Toast.success(f'Successfully synced {synced_count} databases!')
+                try:
+                    for idx, db_data in enumerate(databases_data, 1):
+                        # Update progress
+                        progress_msg.set_text(f'Processing database {idx}/{len(databases_data)}...')
 
-        # Reload teams to show updated sync time
-        load_teams(user, server, container)
+                        # Extract database ID and name
+                        db_id = db_data.get('id') or db_data.get('databaseId')
+                        db_name = db_data.get('name') or db_data.get('databaseName', f'Database {db_id}')
 
-    except Exception as e:
-        Toast.error(f'Error syncing databases: {str(e)}')
+                        if not db_id:
+                            continue
+
+                        # Check if database already exists
+                        existing_db = db.query(Database).filter(
+                            Database.team_id == team.id,
+                            Database.database_id == db_id
+                        ).first()
+
+                        if existing_db:
+                            # Update existing database name (keep exclusion status)
+                            existing_db.name = db_name
+                            updated_count += 1
+                            with status_container:
+                                exclusion_status = " (excluded)" if existing_db.is_excluded else " (included)"
+                                ui.label(f'✓ Updated: {db_name}{exclusion_status}').classes('text-positive text-sm')
+                        else:
+                            # Create new database - EXCLUDED by default for safety
+                            new_db = Database(
+                                team_id=team.id,
+                                database_id=db_id,
+                                name=db_name,
+                                is_excluded=True  # Default: excluded (safe default)
+                            )
+                            db.add(new_db)
+                            new_count += 1
+                            with status_container:
+                                ui.label(f'+ Created: {db_name} (excluded by default)').classes('text-primary text-sm')
+
+                        synced_count += 1
+                        await asyncio.sleep(0.05)  # Small delay for UI updates
+
+                    # Update team last sync time
+                    team_obj = db.query(Team).filter(Team.id == team.id).first()
+                    team_obj.last_sync = datetime.utcnow()
+
+                    db.commit()
+
+                    # Create audit log
+                    create_audit_log(
+                        db=db,
+                        user_id=user.id,
+                        action='databases_synced',
+                        resource_type='team',
+                        resource_id=team.id,
+                        details=f'Synced {synced_count} databases for team: {team.name}',
+                        auto_commit=True
+                    )
+
+                    return synced_count, new_count, updated_count
+
+                finally:
+                    db.close()
+
+            synced_count, new_count, updated_count = await loop.run_in_executor(None, asyncio.run, save_databases())
+
+            progress_msg.set_text(f'✓ Successfully synced {synced_count} databases!')
+            progress_msg.classes('text-positive font-bold')
+
+            # Show summary
+            with summary_container:
+                ui.separator()
+                ui.label('Summary:').classes('font-bold')
+                if new_count > 0:
+                    ui.label(f'• {new_count} new databases added (excluded by default)').classes('text-sm')
+                if updated_count > 0:
+                    ui.label(f'• {updated_count} existing databases updated').classes('text-sm')
+                ui.label('Note: New databases are excluded by default for safety.').classes('text-sm text-grey-7')
+                ui.label('Enable them in the Sync page to include in syncs.').classes('text-sm text-grey-7')
+
+            # Reload teams to show updated sync time
+            load_teams(user, server, container)
+
+            # Close dialog after short delay
+            await asyncio.sleep(4)
+            dialog.close()
+
+        except Exception as e:
+            progress_msg.set_text(f'❌ Error: {str(e)}')
+            progress_msg.classes('text-negative')
+            Toast.error(f'Error syncing databases: {str(e)}')
+
+            # Close dialog after showing error
+            await asyncio.sleep(3)
+            dialog.close()
+
+    # Execute sync in background without blocking UI
+    asyncio.create_task(execute_sync())
 
 
 def toggle_team_status(user, team, is_active, container):
