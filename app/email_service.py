@@ -12,19 +12,57 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
 from datetime import datetime
+from .database import get_db
+from .models.smtp_config import SmtpConfig
+from .utils.encryption import get_encryption_manager
 
-
-# SMTP Configuration from environment
-SMTP_HOST = os.getenv('SMTP_HOST', 'localhost')
-SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
-SMTP_USERNAME = os.getenv('SMTP_USERNAME', '')
-SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
-SMTP_USE_TLS = os.getenv('SMTP_USE_TLS', 'true').lower() == 'true'
-SMTP_FROM_EMAIL = os.getenv('SMTP_FROM_EMAIL', 'noreply@nx2git.local')
-SMTP_FROM_NAME = os.getenv('SMTP_FROM_NAME', 'Ninox2Git')
 
 # Application URL for email links
 APP_URL = os.getenv('APP_URL', 'http://localhost:8000')
+
+
+def get_active_smtp_config():
+    """
+    Get active SMTP configuration from database
+    Falls back to environment variables if no active config in database
+
+    Returns:
+        Dictionary with SMTP configuration
+    """
+    db = get_db()
+    try:
+        # Try to get active SMTP config from database
+        smtp_config = db.query(SmtpConfig).filter(SmtpConfig.is_active == True).first()
+
+        if smtp_config:
+            # Decrypt password
+            encryption = get_encryption_manager()
+            password = encryption.decrypt(smtp_config.password_encrypted)
+
+            return {
+                'host': smtp_config.host,
+                'port': smtp_config.port,
+                'username': smtp_config.username,
+                'password': password,
+                'use_tls': smtp_config.use_tls,
+                'use_ssl': smtp_config.use_ssl,
+                'from_email': smtp_config.from_email,
+                'from_name': smtp_config.from_name
+            }
+    finally:
+        db.close()
+
+    # Fall back to environment variables if no active config
+    return {
+        'host': os.getenv('SMTP_HOST', 'localhost'),
+        'port': int(os.getenv('SMTP_PORT', '587')),
+        'username': os.getenv('SMTP_USER', os.getenv('SMTP_USERNAME', '')),
+        'password': os.getenv('SMTP_PASSWORD', ''),
+        'use_tls': os.getenv('SMTP_USE_TLS', 'true').lower() == 'true',
+        'use_ssl': False,
+        'from_email': os.getenv('SMTP_FROM', os.getenv('SMTP_FROM_EMAIL', 'noreply@nx2git.local')),
+        'from_name': os.getenv('SMTP_FROM_NAME', 'Ninox2Git')
+    }
 
 
 class EmailError(Exception):
@@ -53,15 +91,18 @@ def create_email_message(
         subject: Email subject
         html_body: HTML email body
         text_body: Plain text email body (optional)
-        from_email: Sender email (defaults to SMTP_FROM_EMAIL)
-        from_name: Sender name (defaults to SMTP_FROM_NAME)
+        from_email: Sender email (uses active SMTP config if not provided)
+        from_name: Sender name (uses active SMTP config if not provided)
 
     Returns:
         MIMEMultipart email message
     """
+    # Get active SMTP config for defaults
+    smtp_config = get_active_smtp_config()
+
     message = MIMEMultipart('alternative')
     message['Subject'] = subject
-    message['From'] = f'{from_name or SMTP_FROM_NAME} <{from_email or SMTP_FROM_EMAIL}>'
+    message['From'] = f'{from_name or smtp_config["from_name"]} <{from_email or smtp_config["from_email"]}>'
     message['To'] = to_email
 
     # Add text part if provided
@@ -92,8 +133,8 @@ def send_email(
         subject: Email subject
         html_body: HTML email body
         text_body: Plain text email body (optional)
-        from_email: Sender email (defaults to SMTP_FROM_EMAIL)
-        from_name: Sender name (defaults to SMTP_FROM_NAME)
+        from_email: Sender email (uses active SMTP config if not provided)
+        from_name: Sender name (uses active SMTP config if not provided)
 
     Returns:
         True if email sent successfully, False otherwise
@@ -103,6 +144,9 @@ def send_email(
         SMTPConfigError: If SMTP configuration is invalid
     """
     try:
+        # Get active SMTP configuration
+        smtp_config = get_active_smtp_config()
+
         # Create message
         message = create_email_message(
             to_email=to_email,
@@ -114,15 +158,16 @@ def send_email(
         )
 
         # Connect to SMTP server
-        if SMTP_USE_TLS:
-            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
-            server.starttls()
+        if smtp_config['use_ssl']:
+            server = smtplib.SMTP_SSL(smtp_config['host'], smtp_config['port'])
         else:
-            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
+            server = smtplib.SMTP(smtp_config['host'], smtp_config['port'])
+            if smtp_config['use_tls']:
+                server.starttls()
 
         # Login if credentials provided
-        if SMTP_USERNAME and SMTP_PASSWORD:
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        if smtp_config['username'] and smtp_config['password']:
+            server.login(smtp_config['username'], smtp_config['password'])
 
         # Send email
         server.send_message(message)
@@ -571,21 +616,25 @@ def test_smtp_connection() -> tuple[bool, str]:
         Tuple of (success, message)
     """
     try:
+        # Get active SMTP configuration
+        smtp_config = get_active_smtp_config()
+
         # Connect to SMTP server
-        if SMTP_USE_TLS:
-            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
-            server.starttls()
+        if smtp_config['use_ssl']:
+            server = smtplib.SMTP_SSL(smtp_config['host'], smtp_config['port'], timeout=10)
         else:
-            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
+            server = smtplib.SMTP(smtp_config['host'], smtp_config['port'], timeout=10)
+            if smtp_config['use_tls']:
+                server.starttls()
 
         # Login if credentials provided
-        if SMTP_USERNAME and SMTP_PASSWORD:
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        if smtp_config['username'] and smtp_config['password']:
+            server.login(smtp_config['username'], smtp_config['password'])
             server.quit()
-            return True, "SMTP connection successful (authenticated)"
+            return True, f"SMTP connection successful (authenticated) - {smtp_config['host']}:{smtp_config['port']}"
         else:
             server.quit()
-            return True, "SMTP connection successful (no authentication)"
+            return True, f"SMTP connection successful (no authentication) - {smtp_config['host']}:{smtp_config['port']}"
 
     except smtplib.SMTPAuthenticationError as e:
         return False, f"SMTP authentication failed: {str(e)}"

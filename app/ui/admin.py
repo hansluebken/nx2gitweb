@@ -40,6 +40,7 @@ def render(user):
         with ui.tabs().classes('w-full') as tabs:
             overview_tab = ui.tab('Overview', icon='dashboard')
             users_tab = ui.tab('Users', icon='people')
+            smtp_tab = ui.tab('SMTP Config', icon='email')
             audit_tab = ui.tab('Audit Logs', icon='receipt_long')
             stats_tab = ui.tab('Statistics', icon='analytics')
 
@@ -52,6 +53,10 @@ def render(user):
             with ui.tab_panel(users_tab):
                 render_users_management(user)
 
+            # SMTP Configuration panel
+            with ui.tab_panel(smtp_tab):
+                render_smtp_config(user)
+
             # Audit logs panel
             with ui.tab_panel(audit_tab):
                 render_audit_logs(user)
@@ -59,6 +64,32 @@ def render(user):
             # Statistics panel
             with ui.tab_panel(stats_tab):
                 render_statistics(user)
+
+
+def render_smtp_config(user):
+    """Render SMTP configuration management"""
+    # Import the smtp_config module
+    from .smtp_config import load_smtp_configs
+
+    with ui.column().classes('w-full gap-4'):
+        # Header with add button
+        with ui.row().classes('w-full items-center justify-between'):
+            ui.label('SMTP Configuration').classes('text-h5 font-bold')
+            ui.button(
+                'Add SMTP Server',
+                icon='add',
+                on_click=lambda: show_smtp_add_dialog(user)
+            ).props('color=primary')
+
+        # SMTP servers list container
+        smtp_container = ui.column().classes('w-full gap-4')
+        load_smtp_configs(user, smtp_container)
+
+
+def show_smtp_add_dialog(user):
+    """Show dialog to add SMTP configuration"""
+    from .smtp_config import show_add_smtp_dialog
+    show_add_smtp_dialog(user)
 
 
 def render_overview(user):

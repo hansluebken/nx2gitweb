@@ -6,6 +6,7 @@ from .database import Database
 from .audit_log import AuditLog
 from .password_reset import PasswordReset
 from .cronjob import Cronjob, CronjobType, IntervalUnit
+from .smtp_config import SmtpConfig
 
 __all__ = [
     'Base',
@@ -17,5 +18,6 @@ __all__ = [
     'PasswordReset',
     'Cronjob',
     'CronjobType',
-    'IntervalUnit'
+    'IntervalUnit',
+    'SmtpConfig'
 ]
