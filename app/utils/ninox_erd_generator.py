@@ -10,7 +10,7 @@ import re
 class NinoxToMermaidConverter:
     """Convert Ninox database structure to Mermaid ERD diagrams"""
 
-    # Mapping Ninox field types to ERD types
+    # Mapping Ninox field types to ERD types (Mermaid compatible)
     TYPE_MAPPING = {
         'string': 'string',
         'text': 'text',
@@ -19,20 +19,20 @@ class NinoxToMermaidConverter:
         'date': 'date',
         'datetime': 'datetime',
         'time': 'time',
-        'choice': 'enum',
-        'multichoice': 'enum[]',
-        'file': 'file',
-        'image': 'image',
-        'ref': 'FK',
-        'rev': 'FK[]',
-        'email': 'email',
-        'phone': 'phone',
-        'url': 'url',
-        'location': 'location',
-        'color': 'color',
-        'icon': 'icon',
-        'formula': 'computed',
-        'button': 'action'
+        'choice': 'string',  # Mermaid doesn't support enum
+        'multichoice': 'string',  # Mermaid doesn't support arrays
+        'file': 'string',
+        'image': 'string',
+        'ref': 'int',  # Foreign key as int
+        'rev': 'int',  # Reverse reference as int
+        'email': 'string',
+        'phone': 'string',
+        'url': 'string',
+        'location': 'string',
+        'color': 'string',
+        'icon': 'string',
+        'formula': 'string',  # Computed field
+        'button': 'string'  # Action
     }
 
     def __init__(self, json_structure: Dict[str, Any], max_tables_per_diagram: int = 10):
@@ -179,10 +179,15 @@ class NinoxToMermaidConverter:
             required = "PK" if field['id'] == 'id' else "NOT NULL" if field['required'] else ""
 
             # Format the field line
-            if field_type == 'FK':
-                mermaid += f'        int {field_name} FK "{field["caption"]}"\n'
+            if field['type'] in ['ref', 'rev']:
+                # Foreign key - use int type and mark as FK in comment
+                mermaid += f'        int {field_name} "{field["caption"]} (FK)"\n'
             else:
-                mermaid += f'        {field_type} {field_name} {required} "{field["caption"]}"\n'
+                # Regular field with optional required marker
+                if required:
+                    mermaid += f'        {field_type} {field_name} "{field["caption"]} ({required})"\n'
+                else:
+                    mermaid += f'        {field_type} {field_name} "{field["caption"]}"\n'
 
         mermaid += '    }\n'
 
@@ -197,9 +202,19 @@ class NinoxToMermaidConverter:
         return mermaid
 
     def _sanitize_field_name(self, name: str) -> str:
-        """Sanitize field names for Mermaid"""
-        name = re.sub(r'[^\w\s-]', '', name)
-        name = re.sub(r'[-\s]+', '_', name)
+        """Sanitize field names for Mermaid - must be valid identifiers"""
+        # Remove all non-alphanumeric characters except underscores
+        name = re.sub(r'[^\w]', '_', name)
+        # Replace multiple underscores with single one
+        name = re.sub(r'_+', '_', name)
+        # Remove leading/trailing underscores
+        name = name.strip('_')
+        # Ensure it starts with a letter (prefix with 'f_' if it starts with number)
+        if name and name[0].isdigit():
+            name = f'f_{name}'
+        # If empty, use generic name
+        if not name:
+            name = 'field'
         return name.lower()
 
     def generate_full_erd(self) -> str:
@@ -230,8 +245,9 @@ class NinoxToMermaidConverter:
                 field_type = field['erd_type']
                 field_name = self._sanitize_field_name(field['caption'])
 
-                if field_type == 'FK':
-                    mermaid += f'        int {field_name} FK\n'
+                # Use proper Mermaid syntax for fields
+                if field['type'] in ['ref', 'rev']:
+                    mermaid += f'        int {field_name}\n'
                 else:
                     mermaid += f'        {field_type} {field_name}\n'
                 field_count += 1
