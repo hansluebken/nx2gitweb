@@ -9,6 +9,7 @@ from ..models.server import Server
 from ..models.team import Team
 from ..models.database import Database
 from ..models.audit_log import AuditLog
+from ..models.user_preference import UserPreference
 from ..auth import create_audit_log
 from ..utils.encryption import get_encryption_manager
 from ..api.ninox_client import NinoxClient
@@ -49,6 +50,13 @@ def render_selectors(user, databases_container, history_container):
     """Render server and team selectors"""
     db = get_db()
     try:
+        # Get or create user preferences
+        preferences = db.query(UserPreference).filter(UserPreference.user_id == user.id).first()
+        if not preferences:
+            preferences = UserPreference(user_id=user.id)
+            db.add(preferences)
+            db.commit()
+
         # Get user's servers
         if user.is_admin:
             servers = db.query(Server).filter(Server.is_active == True).all()
@@ -73,11 +81,24 @@ def render_selectors(user, databases_container, history_container):
         # Create server options
         server_options = {server.name: server for server in servers}
 
+        # Determine initial server selection
+        initial_server = None
+        if preferences.last_selected_server_id:
+            # Try to find the last selected server
+            for server in servers:
+                if server.id == preferences.last_selected_server_id:
+                    initial_server = server.name
+                    break
+
+        # If no saved preference or server not found, use the first one
+        if not initial_server:
+            initial_server = list(server_options.keys())[0] if server_options else None
+
         with ui.row().classes('w-full items-center gap-4'):
             server_select = ui.select(
                 label='Select Server',
                 options=list(server_options.keys()),
-                value=list(server_options.keys())[0] if server_options else None
+                value=initial_server
             ).classes('flex-1')
 
             team_select = ui.select(
@@ -93,13 +114,30 @@ def render_selectors(user, databases_container, history_container):
                 event_db = get_db()
                 try:
                     server = server_options[e.value]
+
+                    # Save server selection to preferences
+                    pref = event_db.query(UserPreference).filter(UserPreference.user_id == user.id).first()
+                    if pref:
+                        pref.last_selected_server_id = server.id
+                        event_db.commit()
+
                     teams = event_db.query(Team).filter(
                         Team.server_id == server.id,
                         Team.is_active == True
                     ).all()
                     team_options = {team.name: team for team in teams}
                     team_select.options = list(team_options.keys())
-                    team_select.value = list(team_options.keys())[0] if team_options else None
+
+                    # Check if there's a saved team preference for this server
+                    initial_team = None
+                    if pref and pref.last_selected_team_id:
+                        for team in teams:
+                            if team.id == pref.last_selected_team_id and team.server_id == server.id:
+                                initial_team = team.name
+                                break
+
+                    # Use saved team or first available
+                    team_select.value = initial_team if initial_team else (list(team_options.keys())[0] if team_options else None)
                     team_select.update()
 
                     # Store team options for later use
@@ -134,6 +172,17 @@ def render_selectors(user, databases_container, history_container):
                 server = server_options[server_select.value]
                 team = team_select.team_options[team_name]
                 logger.info(f"Loading databases for team: {team.name} (id={team.id})")
+
+                # Save team selection to preferences
+                event_db = get_db()
+                try:
+                    pref = event_db.query(UserPreference).filter(UserPreference.user_id == user.id).first()
+                    if pref:
+                        pref.last_selected_team_id = team.id
+                        event_db.commit()
+                finally:
+                    event_db.close()
+
                 load_databases(user, server, team, databases_container)
                 load_sync_history(user, team, history_container)
             else:

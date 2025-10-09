@@ -49,6 +49,13 @@ class User(Base, TimestampMixin):
         cascade="all, delete-orphan"
     )
 
+    preferences = relationship(
+        "UserPreference",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False  # One-to-one relationship
+    )
+
     def __repr__(self) -> str:
         try:
             # Try to access attributes, but handle detached instance gracefully
