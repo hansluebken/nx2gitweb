@@ -12,6 +12,7 @@ from ..models.team import Team
 from ..models.server import Server
 from ..models.database import Database
 from ..utils.encryption import get_encryption_manager
+from ..utils.github_utils import sanitize_name, get_repo_name_from_server
 from ..api.ninox_client import NinoxClient
 from ..api.github_manager import GitHubManager
 from ..auth import create_audit_log
@@ -195,17 +196,8 @@ class CronjobScheduler:
             # Decrypt GitHub token
             github_token = encryption.decrypt(user.github_token_encrypted)
 
-            # Sanitize names
-            import re
-            def sanitize_name(name):
-                safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
-                safe_name = safe_name.replace(' ', '_')
-                safe_name = safe_name.strip('. ')
-                return safe_name
-
-            # Get repository name from server URL
-            server_hostname = server.url.replace('https://', '').replace('http://', '').split('/')[0]
-            repo_name = sanitize_name(server_hostname)
+            # Use helper function to get repo name from server
+            repo_name = get_repo_name_from_server(server)
 
             # Create GitHub manager
             github_mgr = GitHubManager(

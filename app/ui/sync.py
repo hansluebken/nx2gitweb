@@ -12,6 +12,7 @@ from ..models.audit_log import AuditLog
 from ..models.user_preference import UserPreference
 from ..auth import create_audit_log
 from ..utils.encryption import get_encryption_manager
+from ..utils.github_utils import sanitize_name, get_repo_name_from_server
 from ..api.ninox_client import NinoxClient
 from ..api.github_manager import GitHubManager
 from .components import (
@@ -323,8 +324,13 @@ def render_database_card(user, server, team, database, container):
                     sync_btn._database = database
 
                 if database.github_path and user.github_organization:
-                    repo_name = user.github_default_repo or 'ninox-backup'
-                    github_url = f'https://github.com/{user.github_organization}/{repo_name}/tree/main/{database.github_path}'
+                    # Get the actual repo name from server (same logic as in sync_database)
+                    repo_name = get_repo_name_from_server(server)
+                    # Build full path to file
+                    db_name = sanitize_name(database.name)
+                    file_name = f'{db_name}-structure.json'
+                    full_path = f'{database.github_path}/{file_name}'
+                    github_url = f'https://github.com/{user.github_organization}/{repo_name}/tree/main/{full_path}'
                     ui.button(
                         'View on GitHub',
                         icon='open_in_new',
@@ -428,22 +434,8 @@ async def sync_database(user, server, team, database, container, progress_label=
 
             github_token = encryption.decrypt(user.github_token_encrypted)
 
-            # Sanitize names for filesystem/GitHub paths
-            def sanitize_name(name):
-                """Remove/replace characters that are problematic for file paths"""
-                import re
-                # Replace problematic characters with underscores or remove them
-                safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
-                # Replace spaces with underscores
-                safe_name = safe_name.replace(' ', '_')
-                # Remove leading/trailing dots and spaces
-                safe_name = safe_name.strip('. ')
-                return safe_name
-
-            # Extract server hostname from URL for repository name
-            # e.g. "https://hagedorn.ninoxdb.de" -> "hagedorn.ninoxdb.de"
-            server_hostname = server.url.replace('https://', '').replace('http://', '').split('/')[0]
-            repo_name = sanitize_name(server_hostname)
+            # Use helper function to get repo name from server
+            repo_name = get_repo_name_from_server(server)
 
             # Create GitHub manager
             github_mgr = GitHubManager(
