@@ -239,15 +239,13 @@ def sync_teams_from_api(user, server, container):
             await asyncio.sleep(0.1)
 
             # Save teams to database in thread pool
-            async def save_teams():
+            def save_teams_sync():
                 db = get_db()
                 synced_count = 0
+                status_items = []
 
                 try:
                     for idx, team_data in enumerate(teams_data, 1):
-                        # Update progress
-                        progress_msg.set_text(f'Processing team {idx}/{len(teams_data)}...')
-
                         # Extract team ID and name
                         team_id = team_data.get('id') or team_data.get('teamId')
                         team_name = team_data.get('name') or team_data.get('teamName', f'Team {team_id}')
@@ -264,8 +262,7 @@ def sync_teams_from_api(user, server, container):
                         if existing_team:
                             # Update existing team
                             existing_team.name = team_name
-                            with status_container:
-                                ui.label(f'✓ Updated: {team_name}').classes('text-positive text-sm')
+                            status_items.append(('updated', team_name))
                         else:
                             # Create new team
                             new_team = Team(
@@ -275,11 +272,9 @@ def sync_teams_from_api(user, server, container):
                                 is_active=True
                             )
                             db.add(new_team)
-                            with status_container:
-                                ui.label(f'+ Created: {team_name}').classes('text-primary text-sm')
+                            status_items.append(('created', team_name))
 
                         synced_count += 1
-                        await asyncio.sleep(0.05)  # Small delay for UI updates
 
                     db.commit()
 
@@ -294,12 +289,21 @@ def sync_teams_from_api(user, server, container):
                         auto_commit=True
                     )
 
-                    return synced_count
+                    return synced_count, status_items
 
                 finally:
                     db.close()
 
-            synced_count = await loop.run_in_executor(None, asyncio.run, save_teams())
+            # Execute save operation
+            synced_count, status_items = await loop.run_in_executor(None, save_teams_sync)
+
+            # Update UI with status items
+            with status_container:
+                for status_type, team_name in status_items:
+                    if status_type == 'updated':
+                        ui.label(f'✓ Updated: {team_name}').classes('text-positive text-sm')
+                    else:
+                        ui.label(f'+ Created: {team_name}').classes('text-primary text-sm')
 
             progress_msg.set_text(f'✓ Successfully synced {synced_count} teams!')
             progress_msg.classes('text-positive font-bold')
@@ -382,17 +386,15 @@ def sync_databases_for_team(user, server, team, container):
             await asyncio.sleep(0.1)
 
             # Save databases to database in thread pool
-            async def save_databases():
+            def save_databases_sync():
                 db = get_db()
                 synced_count = 0
                 new_count = 0
                 updated_count = 0
+                status_items = []
 
                 try:
                     for idx, db_data in enumerate(databases_data, 1):
-                        # Update progress
-                        progress_msg.set_text(f'Processing database {idx}/{len(databases_data)}...')
-
                         # Extract database ID and name
                         db_id = db_data.get('id') or db_data.get('databaseId')
                         db_name = db_data.get('name') or db_data.get('databaseName', f'Database {db_id}')
@@ -410,9 +412,8 @@ def sync_databases_for_team(user, server, team, container):
                             # Update existing database name (keep exclusion status)
                             existing_db.name = db_name
                             updated_count += 1
-                            with status_container:
-                                exclusion_status = " (excluded)" if existing_db.is_excluded else " (included)"
-                                ui.label(f'✓ Updated: {db_name}{exclusion_status}').classes('text-positive text-sm')
+                            exclusion_status = " (excluded)" if existing_db.is_excluded else " (included)"
+                            status_items.append(('updated', f'{db_name}{exclusion_status}'))
                         else:
                             # Create new database - EXCLUDED by default for safety
                             new_db = Database(
@@ -423,11 +424,9 @@ def sync_databases_for_team(user, server, team, container):
                             )
                             db.add(new_db)
                             new_count += 1
-                            with status_container:
-                                ui.label(f'+ Created: {db_name} (excluded by default)').classes('text-primary text-sm')
+                            status_items.append(('created', f'{db_name} (excluded by default)'))
 
                         synced_count += 1
-                        await asyncio.sleep(0.05)  # Small delay for UI updates
 
                     # Update team last sync time
                     team_obj = db.query(Team).filter(Team.id == team.id).first()
@@ -446,12 +445,23 @@ def sync_databases_for_team(user, server, team, container):
                         auto_commit=True
                     )
 
-                    return synced_count, new_count, updated_count
+                    return synced_count, new_count, updated_count, status_items
 
                 finally:
                     db.close()
 
-            synced_count, new_count, updated_count = await loop.run_in_executor(None, asyncio.run, save_databases())
+            # Execute save operation
+            synced_count, new_count, updated_count, status_items = await loop.run_in_executor(None, save_databases_sync)
+
+            # Update progress for each item
+            for idx, (status_type, description) in enumerate(status_items, 1):
+                progress_msg.set_text(f'Processing database {idx}/{len(status_items)}...')
+                with status_container:
+                    if status_type == 'updated':
+                        ui.label(f'✓ Updated: {description}').classes('text-positive text-sm')
+                    else:
+                        ui.label(f'+ Created: {description}').classes('text-primary text-sm')
+                await asyncio.sleep(0.05)  # Small delay for UI updates
 
             progress_msg.set_text(f'✓ Successfully synced {synced_count} databases!')
             progress_msg.classes('text-positive font-bold')
