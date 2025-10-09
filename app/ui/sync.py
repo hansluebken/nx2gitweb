@@ -28,10 +28,25 @@ def render(user):
     Args:
         user: Current user object
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     ui.colors(primary=PRIMARY_COLOR)
 
     # Navigation header
     NavHeader(user, 'sync').render()
+
+    # Get team parameter from URL if present
+    from urllib.parse import parse_qs, urlparse
+    try:
+        query_params = parse_qs(urlparse(ui.page.url).query)
+        team_id_param = query_params.get('team', [None])[0]
+        if team_id_param:
+            team_id_param = int(team_id_param)
+            logger.info(f"Team ID from URL parameter: {team_id_param}")
+    except:
+        team_id_param = None
+        logger.info("No team ID parameter in URL")
 
     # Main content
     with ui.column().classes('w-full p-6 gap-6').style('max-width: 1400px; margin: 0 auto;'):
@@ -43,11 +58,14 @@ def render(user):
         history_container = ui.column().classes('w-full gap-4 mt-4')
 
         with selector_container:
-            render_selectors(user, databases_container, history_container)
+            render_selectors(user, databases_container, history_container, team_id_param)
 
 
-def render_selectors(user, databases_container, history_container):
+def render_selectors(user, databases_container, history_container, team_id_param=None):
     """Render server and team selectors"""
+    import logging
+    logger = logging.getLogger(__name__)
+
     db = get_db()
     try:
         # Get or create user preferences
@@ -56,6 +74,21 @@ def render_selectors(user, databases_container, history_container):
             preferences = UserPreference(user_id=user.id)
             db.add(preferences)
             db.commit()
+
+        # If team_id_param is provided, find the team and its server
+        override_server = None
+        override_team = None
+        if team_id_param:
+            logger.info(f"Looking for team with ID: {team_id_param}")
+            team = db.query(Team).filter(Team.id == team_id_param).first()
+            if team:
+                logger.info(f"Found team: {team.name}, server_id: {team.server_id}")
+                override_team = team
+                override_server = db.query(Server).filter(Server.id == team.server_id).first()
+                # Also update preferences to remember this selection
+                preferences.last_selected_team_id = team.id
+                preferences.last_selected_server_id = team.server_id
+                db.commit()
 
         # Get user's servers
         if user.is_admin:
@@ -83,7 +116,11 @@ def render_selectors(user, databases_container, history_container):
 
         # Determine initial server selection
         initial_server = None
-        if preferences.last_selected_server_id:
+        if override_server:
+            # Use the server from the team parameter
+            initial_server = override_server.name
+            logger.info(f"Using override server: {initial_server}")
+        elif preferences.last_selected_server_id:
             # Try to find the last selected server
             for server in servers:
                 if server.id == preferences.last_selected_server_id:
@@ -128,9 +165,14 @@ def render_selectors(user, databases_container, history_container):
                     team_options = {team.name: team for team in teams}
                     team_select.options = list(team_options.keys())
 
-                    # Check if there's a saved team preference for this server
+                    # Check if there's a saved team preference for this server or override
                     initial_team = None
-                    if pref and pref.last_selected_team_id:
+
+                    # Check for override team first (when coming from Teams page)
+                    if hasattr(e, 'is_initial_load') and e.is_initial_load and override_team and override_team.server_id == server.id:
+                        initial_team = override_team.name
+                        logger.info(f"Using override team: {initial_team}")
+                    elif pref and pref.last_selected_team_id:
                         for team in teams:
                             if team.id == pref.last_selected_team_id and team.server_id == server.id:
                                 initial_team = team.name
@@ -193,7 +235,9 @@ def render_selectors(user, databases_container, history_container):
 
         # Load initial teams and databases
         if server_select.value:
-            on_server_change(type('Event', (), {'value': server_select.value})())
+            # Create event with initial load flag
+            event = type('Event', (), {'value': server_select.value, 'is_initial_load': True})()
+            on_server_change(event)
 
     finally:
         db.close()

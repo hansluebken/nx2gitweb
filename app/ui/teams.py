@@ -424,7 +424,7 @@ def sync_databases_for_team(user, server, team, container):
                             )
                             db.add(new_db)
                             new_count += 1
-                            status_items.append(('created', f'{db_name} (excluded by default)'))
+                            status_items.append(('created', f'{db_name} 🔒 (GESPERRT)'))
 
                         synced_count += 1
 
@@ -458,30 +458,54 @@ def sync_databases_for_team(user, server, team, container):
                 progress_msg.set_text(f'Processing database {idx}/{len(status_items)}...')
                 with status_container:
                     if status_type == 'updated':
-                        ui.label(f'✓ Updated: {description}').classes('text-positive text-sm')
+                        ui.label(f'✓ Aktualisiert: {description}').classes('text-positive text-sm')
                     else:
-                        ui.label(f'+ Created: {description}').classes('text-primary text-sm')
+                        # Highlight new databases more prominently
+                        with ui.row().classes('items-center gap-1'):
+                            ui.icon('add_circle', size='sm').classes('text-orange-600')
+                            ui.label(f'NEU: {description}').classes('text-sm font-bold text-orange-600')
                 await asyncio.sleep(0.05)  # Small delay for UI updates
 
             progress_msg.set_text(f'✓ Successfully synced {synced_count} databases!')
             progress_msg.classes('text-positive font-bold')
 
-            # Show summary
+            # Show summary with prominent warning for new databases
             with summary_container:
                 ui.separator()
-                ui.label('Summary:').classes('font-bold')
+
+                # Show prominent warning if new databases were found
                 if new_count > 0:
-                    ui.label(f'• {new_count} new databases added (excluded by default)').classes('text-sm')
+                    with ui.card().classes('w-full p-4 bg-orange-50 border-orange-500').style('border-width: 2px'):
+                        with ui.column().classes('w-full gap-2'):
+                            with ui.row().classes('items-center gap-2'):
+                                ui.icon('warning', size='md').classes('text-orange-600')
+                                ui.label(f'⚠️ {new_count} NEUE DATENBANK{"EN" if new_count > 1 else ""} GEFUNDEN').classes('text-h6 font-bold text-orange-700')
+
+                            ui.label('Neue Datenbanken sind aus Sicherheitsgründen standardmäßig GESPERRT.').classes('text-sm font-medium')
+                            ui.label('Sie müssen diese manuell freigeben, bevor sie synchronisiert werden können.').classes('text-sm')
+
+                            # Button to navigate to sync page
+                            ui.button(
+                                f'→ Zur Sync-Seite gehen und Datenbanken freigeben',
+                                icon='lock_open',
+                                on_click=lambda: ui.navigate.to(f'/sync?team={team.id}')
+                            ).props('color=orange').classes('mt-2')
+
+                # Show update summary
                 if updated_count > 0:
-                    ui.label(f'• {updated_count} existing databases updated').classes('text-sm')
-                ui.label('Note: New databases are excluded by default for safety.').classes('text-sm text-grey-7')
-                ui.label('Enable them in the Sync page to include in syncs.').classes('text-sm text-grey-7')
+                    with ui.row().classes('items-center gap-2 mt-2'):
+                        ui.icon('update', size='sm').classes('text-positive')
+                        ui.label(f'{updated_count} bestehende Datenbank{"en" if updated_count > 1 else ""} aktualisiert').classes('text-sm')
 
             # Reload teams to show updated sync time
             load_teams(user, server, container)
 
-            # Close dialog after short delay
-            await asyncio.sleep(4)
+            # Close dialog after delay (longer if new databases were found)
+            if new_count > 0:
+                # Keep dialog open longer so user sees the warning
+                await asyncio.sleep(8)
+            else:
+                await asyncio.sleep(3)
             dialog.close()
 
         except Exception as e:
