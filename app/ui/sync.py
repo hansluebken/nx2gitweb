@@ -13,6 +13,7 @@ from ..models.user_preference import UserPreference
 from ..auth import create_audit_log
 from ..utils.encryption import get_encryption_manager
 from ..utils.github_utils import sanitize_name, get_repo_name_from_server
+from ..utils.ninox_erd_generator import generate_all_diagrams
 from ..api.ninox_client import NinoxClient
 from ..api.github_manager import GitHubManager
 from .components import (
@@ -482,6 +483,37 @@ async def sync_database(user, server, team, database, container, progress_label=
                 commit_message=f'Update {database.name} structure from {team.name}'
             )
             logger.info(f"Uploaded to GitHub: {full_path}")
+
+            # Step 6b: Generate and upload ERD diagrams
+            if progress_label:
+                progress_label.text = 'Generating ERD diagrams...'
+                await asyncio.sleep(0.1)
+
+            try:
+                # Generate all ERD diagrams
+                erd_files = generate_all_diagrams(db_structure)
+                logger.info(f"Generated {len(erd_files)} ERD files")
+
+                # Upload each ERD file
+                erd_base_path = f'{github_path}/{db_name}-erd'
+                for erd_file_path, erd_content in erd_files.items():
+                    erd_full_path = f'{erd_base_path}/{erd_file_path}'
+
+                    if progress_label:
+                        progress_label.text = f'Uploading ERD: {erd_file_path}...'
+                        await asyncio.sleep(0.05)
+
+                    github_mgr.update_file(
+                        repo=repo,
+                        file_path=erd_full_path,
+                        content=erd_content,
+                        commit_message=f'Update {database.name} ERD diagrams'
+                    )
+                    logger.info(f"Uploaded ERD: {erd_full_path}")
+
+            except Exception as e:
+                logger.warning(f"Failed to generate/upload ERD: {e}")
+                # Don't fail the whole sync if ERD generation fails
 
             # Step 7: Update database record
             if progress_label:
