@@ -898,7 +898,8 @@ def show_erd_viewer_dialog(user, server, team, database):
                         ui.label('Error Loading ERD').classes('text-h6 font-bold text-negative')
                         ui.label(str(e)).classes('text-sm mt-2')
 
-    background_tasks.create(load_svg())
+    # Use asyncio.create_task instead of background_tasks (keeps UI context)
+    asyncio.create_task(load_svg())
 
 
 def load_sync_history(user, team, container):

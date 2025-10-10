@@ -20,12 +20,13 @@ class GitHubManager:
     def __init__(self, access_token: str, organization: Optional[str] = None):
         """
         Initialisiert den GitHub Manager
-        
+
         Args:
             access_token: GitHub Personal Access Token
             organization: GitHub Organisation (optional, sonst User-Repos)
         """
         self.github = Github(access_token)
+        self.access_token = access_token  # Store token for authenticated requests
         self.organization = organization
         
         # Hole User oder Organisation
@@ -104,11 +105,11 @@ class GitHubManager:
     def get_file_content(self, repo, file_path: str) -> Optional[str]:
         """
         Holt den Inhalt einer Datei aus dem Repository
-        
+
         Args:
             repo: Repository Objekt
             file_path: Pfad zur Datei im Repository
-        
+
         Returns:
             Dateiinhalt als String oder None wenn nicht vorhanden
         """
@@ -117,7 +118,26 @@ class GitHubManager:
             if isinstance(content, list):
                 # Sollte nicht passieren für einzelne Dateien
                 return None
-            return content.decoded_content.decode('utf-8')
+
+            # Handle different encoding types
+            if content.encoding == "base64":
+                # Normal case: file is base64 encoded
+                return content.decoded_content.decode('utf-8')
+            elif content.encoding == "none" or content.size > 1024 * 1024:
+                # Large file (>1MB) or encoding is "none": use download_url with authentication
+                import requests
+                # For private repos, we need to authenticate the download request
+                headers = {
+                    'Authorization': f'token {self.access_token}',
+                    'Accept': 'application/vnd.github.v3.raw'
+                }
+                response = requests.get(content.download_url, headers=headers)
+                response.raise_for_status()
+                return response.text
+            else:
+                # Try decoded_content as fallback
+                return content.decoded_content.decode('utf-8')
+
         except GithubException as e:
             if e.status == 404:
                 return None

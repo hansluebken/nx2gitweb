@@ -306,26 +306,26 @@ def show_json_viewer_dialog(user, server, team, database):
                 loading_container = ui.column().classes('w-full items-center gap-4 p-8')
                 with loading_container:
                     ui.spinner(size='xl', color='primary')
-                    status_label = ui.label('Loading JSON from GitHub...').classes('text-h6')
+                    ui.label('Loading JSON from GitHub...').classes('text-h6')
 
                 # JSON editor container (initially hidden)
                 json_container = ui.column().classes('w-full').style('display: none;')
+                with json_container:
+                    # Create json_editor placeholder - will be replaced
+                    json_editor_placeholder = ui.column().classes('w-full')
 
                 # Error container (initially hidden)
                 error_container = ui.column().classes('w-full').style('display: none;')
 
     dialog.open()
 
-    # Load JSON in background
-    async def load_json():
+    # Load JSON and display with proper JSON editor
+    def load_json_data():
         try:
             logger.info(f"Loading JSON for {database.name} from GitHub...")
 
             if not user.github_token_encrypted or not user.github_organization:
                 raise Exception("GitHub not configured")
-
-            status_label.text = 'Loading from GitHub...'
-            await asyncio.sleep(0.1)
 
             encryption = get_encryption_manager()
             github_token = encryption.decrypt(user.github_token_encrypted)
@@ -341,31 +341,44 @@ def show_json_viewer_dialog(user, server, team, database):
             db_name = sanitize_name(database.name)
             file_path = f'{database.github_path}/{db_name}-structure.json'
 
+            logger.info(f"Getting file content from: {file_path}")
             content = github_mgr.get_file_content(repo, file_path)
-            if not content:
-                raise Exception(f"File not found")
 
+            if not content:
+                raise Exception(f"File not found or empty")
+
+            # Parse JSON to verify it's valid
             json_data = json_lib.loads(content)
 
+            logger.info(f"JSON loaded successfully: {len(content)} characters")
+
+            # Update UI - hide loading, show JSON container
             loading_container.style('display: none;')
             json_container.style('display: block;')
 
-            with json_container:
+            # Create JSON editor with the loaded data - CORRECT FORMAT!
+            with json_editor_placeholder:
+                json_editor_placeholder.clear()  # Clear placeholder
                 ui.json_editor({
-                    'content': {'json': json_data},
+                    'content': {'json': json_data},  # CORRECT: content wrapper needed!
                     'mode': 'view',
-                    'modes': ['tree', 'view', 'code'],
-                    'search': True
+                    'modes': ['tree', 'view', 'code', 'text'],
+                    'search': True,
+                    'navigationBar': True
                 }).classes('w-full').style('height: 80vh;')
 
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error loading JSON: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
             loading_container.style('display: none;')
             error_container.style('display: block;')
             with error_container:
                 ui.label(f'Error: {str(e)}').classes('text-negative')
 
-    background_tasks.create(load_json())
+    # Use a timer to load after the dialog is rendered
+    ui.timer(0.5, load_json_data, once=True)
 
 
 def download_json(database):
