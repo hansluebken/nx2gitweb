@@ -87,15 +87,17 @@ def render_server_selector(user, teams_container):
             ).props('color=primary')
 
         # Load teams for selected server
-        def on_server_change(e):
-            if e.value:
-                load_teams(user, server_options[e.value], teams_container)
+        def on_server_change(e=None):
+            # Use server_select.value directly instead of e.value
+            current_server = server_select.value
+            if current_server and current_server in server_options:
+                load_teams(user, server_options[current_server], teams_container)
 
         server_select.on('update:model-value', on_server_change)
 
         # Load initial teams
         if server_select.value:
-            load_teams(user, server_options[server_select.value], teams_container)
+            on_server_change()
 
     finally:
         db.close()

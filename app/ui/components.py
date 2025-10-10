@@ -45,6 +45,7 @@ class NavHeader:
                 self._nav_link('Servers', '/servers', 'storage')
                 self._nav_link('Teams', '/teams', 'group')
                 self._nav_link('Sync', '/sync', 'sync')
+                self._nav_link('JSON Viewer', '/json-viewer', 'code')
                 self._nav_link('Cronjobs', '/cronjobs', 'schedule')
 
                 if self.user.is_admin:

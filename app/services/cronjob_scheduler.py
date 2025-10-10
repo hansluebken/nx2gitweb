@@ -13,7 +13,7 @@ from ..models.server import Server
 from ..models.database import Database
 from ..utils.encryption import get_encryption_manager
 from ..utils.github_utils import sanitize_name, get_repo_name_from_server
-from ..utils.ninox_erd_generator import generate_all_diagrams
+from ..utils.svg_erd_generator import generate_svg_erd
 from ..api.ninox_client import NinoxClient
 from ..api.github_manager import GitHubManager
 from ..auth import create_audit_log
@@ -228,22 +228,20 @@ class CronjobScheduler:
                 commit_message=f'[Automated] Update {database.name} structure from {team.name}'
             )
 
-            # Generate and upload ERD diagrams
+            # Generate and upload SVG ERD diagram
             try:
-                erd_files = generate_all_diagrams(db_structure)
-                logger.info(f"    Generated {len(erd_files)} ERD files")
+                svg_content = generate_svg_erd(db_structure)
+                logger.info(f"    Generated SVG ERD: {len(svg_content)} bytes")
 
-                # Upload each ERD file
-                erd_base_path = f'{team_name}/{db_name}-erd'
-                for erd_file_path, erd_content in erd_files.items():
-                    erd_full_path = f'{erd_base_path}/{erd_file_path}'
-                    github_mgr.update_file(
-                        repo=repo,
-                        file_path=erd_full_path,
-                        content=erd_content,
-                        commit_message=f'[Automated] Update {database.name} ERD diagrams'
-                    )
-                logger.info(f"    ✓ Uploaded ERD diagrams to {erd_base_path}")
+                # Upload SVG file
+                erd_file_path = f'{team_name}/{db_name}-erd.svg'
+                github_mgr.update_file(
+                    repo=repo,
+                    file_path=erd_file_path,
+                    content=svg_content,
+                    commit_message=f'[Automated] Update {database.name} ERD diagram'
+                )
+                logger.info(f"    ✓ Uploaded SVG ERD: {erd_file_path}")
             except Exception as e:
                 logger.warning(f"    Failed to generate/upload ERD: {e}")
 

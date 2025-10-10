@@ -13,7 +13,7 @@ from ..models.user_preference import UserPreference
 from ..auth import create_audit_log
 from ..utils.encryption import get_encryption_manager
 from ..utils.github_utils import sanitize_name, get_repo_name_from_server
-from ..utils.ninox_erd_generator import generate_all_diagrams
+from ..utils.svg_erd_generator import generate_svg_erd
 from ..api.ninox_client import NinoxClient
 from ..api.github_manager import GitHubManager
 from .components import (
@@ -147,12 +147,20 @@ def render_selectors(user, databases_container, history_container, team_id_param
             ).classes('flex-1')
 
         # Update teams when server changes
-        def on_server_change(e):
-            if e.value:
+        def on_server_change(e=None):
+            import logging
+            logger = logging.getLogger(__name__)
+
+            # Get current value from server_select directly, not from event
+            current_server_name = server_select.value
+            logger.info(f"=== SERVER CHANGE === Current server_select.value: {current_server_name}")
+
+            if current_server_name and current_server_name in server_options:
                 # Use a NEW db session for this event
                 event_db = get_db()
                 try:
-                    server = server_options[e.value]
+                    server = server_options[current_server_name]
+                    logger.info(f"Selected server: {server.name} (id={server.id})")
 
                     # Save server selection to preferences
                     pref = event_db.query(UserPreference).filter(UserPreference.user_id == user.id).first()
@@ -164,8 +172,11 @@ def render_selectors(user, databases_container, history_container, team_id_param
                         Team.server_id == server.id,
                         Team.is_active == True
                     ).all()
+                    logger.info(f"Found {len(teams)} teams for server {server.name}")
+
                     team_options = {team.name: team for team in teams}
                     team_select.options = list(team_options.keys())
+                    logger.info(f"Set team_select.options to {len(team_select.options)} teams")
 
                     # Check if there's a saved team preference for this server or override
                     initial_team = None
@@ -182,7 +193,10 @@ def render_selectors(user, databases_container, history_container, team_id_param
 
                     # Use saved team or first available
                     team_select.value = initial_team if initial_team else (list(team_options.keys())[0] if team_options else None)
+                    logger.info(f"Set team_select.value to: {team_select.value}")
+
                     team_select.update()
+                    logger.info("Called team_select.update()")
 
                     # Store team options for later use
                     team_select.team_options = team_options
@@ -237,9 +251,9 @@ def render_selectors(user, databases_container, history_container, team_id_param
 
         # Load initial teams and databases
         if server_select.value:
-            # Create event with initial load flag
-            event = type('Event', (), {'value': server_select.value, 'is_initial_load': True})()
-            on_server_change(event)
+            # Call without event parameter, function uses server_select.value directly
+            logger.info("Loading initial teams...")
+            on_server_change()
 
     finally:
         db.close()
@@ -325,15 +339,25 @@ def render_database_card(user, server, team, database, container):
                     sync_btn._database = database
 
                 if database.github_path and user.github_organization:
-                    # Get the actual repo name from server (same logic as in sync_database)
-                    repo_name = get_repo_name_from_server(server)
-                    # Build full path to file
-                    db_name = sanitize_name(database.name)
-                    file_name = f'{db_name}-structure.json'
-                    full_path = f'{database.github_path}/{file_name}'
-                    github_url = f'https://github.com/{user.github_organization}/{repo_name}/tree/main/{full_path}'
+                    # View Structure button - opens JSON viewer dialog
                     ui.button(
-                        'View on GitHub',
+                        'View JSON',
+                        icon='data_object',
+                        on_click=lambda s=server, t=team, d=database: show_json_viewer_from_sync(user, s, t, d)
+                    ).props('flat dense color=primary')
+
+                    # View ERD button - opens SVG viewer dialog
+                    ui.button(
+                        'View ERD',
+                        icon='account_tree',
+                        on_click=lambda s=server, t=team, d=database: show_erd_viewer_dialog(user, s, t, d)
+                    ).props('flat dense color=secondary')
+
+                    # GitHub link to folder - get repo name from server
+                    github_repo_name = get_repo_name_from_server(server)
+                    github_url = f'https://github.com/{user.github_organization}/{github_repo_name}/tree/main/{database.github_path}'
+                    ui.button(
+                        'GitHub',
                         icon='open_in_new',
                         on_click=lambda url=github_url: ui.navigate.to(url, new_tab=True)
                     ).props('flat dense')
@@ -370,13 +394,13 @@ def handle_sync_click(user, server, team, database, container, button):
 
     progress_dialog.open()
 
-    # Create async task
+    # Run sync directly as button handler (not background task)
     async def run_sync():
         try:
             logger.info(f"=== SYNC START === Database: {database.name}")
 
             progress_label.text = 'Fetching from Ninox...'
-            await asyncio.sleep(0.1)  # Let UI update
+            await asyncio.sleep(0.1)
 
             # Run the actual sync
             await sync_database(user, server, team, database, container, progress_label)
@@ -391,8 +415,8 @@ def handle_sync_click(user, server, team, database, container, button):
             progress_dialog.close()
             Toast.error(f'Error: {str(e)}')
 
-    # Start background task
-    background_tasks.create(run_sync())
+    # Call async function directly (runs in UI context, not background)
+    asyncio.create_task(run_sync())
 
 
 async def sync_database(user, server, team, database, container, progress_label=None):
@@ -424,7 +448,14 @@ async def sync_database(user, server, team, database, container, progress_label=
             await asyncio.sleep(0.1)
 
         logger.info(f"Fetching structure from Ninox...")
-        db_structure = client.get_database_structure(team.team_id, database.database_id)
+        # Run in executor to avoid blocking UI
+        loop = asyncio.get_event_loop()
+        db_structure = await loop.run_in_executor(
+            None,
+            client.get_database_structure,
+            team.team_id,
+            database.database_id
+        )
         logger.info(f"Structure fetched: {len(str(db_structure))} chars")
 
         # Check if GitHub is configured (now in user, not server)
@@ -476,43 +507,55 @@ async def sync_database(user, server, team, database, container, progress_label=
                 progress_label.text = f'Uploading to GitHub: {full_path}...'
                 await asyncio.sleep(0.1)
 
-            github_mgr.update_file(
-                repo=repo,
-                file_path=full_path,
-                content=structure_json,
-                commit_message=f'Update {database.name} structure from {team.name}'
+            # Upload to GitHub in executor
+            await loop.run_in_executor(
+                None,
+                github_mgr.update_file,
+                repo,
+                full_path,
+                structure_json,
+                f'Update {database.name} structure from {team.name}'
             )
             logger.info(f"Uploaded to GitHub: {full_path}")
 
-            # Step 6b: Generate and upload ERD diagrams
+            # Step 6b: Generate and upload SVG ERD diagram
             if progress_label:
-                progress_label.text = 'Generating ERD diagrams...'
+                progress_label.text = 'Generating ERD diagram...'
                 await asyncio.sleep(0.1)
 
             try:
-                # Generate all ERD diagrams
-                erd_files = generate_all_diagrams(db_structure)
-                logger.info(f"Generated {len(erd_files)} ERD files")
+                # Generate SVG ERD
+                logger.info(f"Generating SVG ERD for {database.name}...")
+                svg_content = generate_svg_erd(db_structure)
 
-                # Upload each ERD file
-                erd_base_path = f'{github_path}/{db_name}-erd'
-                for erd_file_path, erd_content in erd_files.items():
-                    erd_full_path = f'{erd_base_path}/{erd_file_path}'
+                if svg_content is None:
+                    logger.error(f"generate_svg_erd returned None for {database.name}!")
+                    raise Exception("SVG generation returned None")
 
-                    if progress_label:
-                        progress_label.text = f'Uploading ERD: {erd_file_path}...'
-                        await asyncio.sleep(0.05)
+                logger.info(f"Generated SVG ERD: {len(svg_content)} bytes")
 
-                    github_mgr.update_file(
-                        repo=repo,
-                        file_path=erd_full_path,
-                        content=erd_content,
-                        commit_message=f'Update {database.name} ERD diagrams'
-                    )
-                    logger.info(f"Uploaded ERD: {erd_full_path}")
+                # Upload SVG file
+                erd_file_path = f'{github_path}/{db_name}-erd.svg'
+
+                if progress_label:
+                    progress_label.text = 'Uploading ERD diagram...'
+                    await asyncio.sleep(0.1)
+
+                # Upload SVG in executor
+                await loop.run_in_executor(
+                    None,
+                    github_mgr.update_file,
+                    repo,
+                    erd_file_path,
+                    svg_content,
+                    f'Update {database.name} ERD diagram'
+                )
+                logger.info(f"Uploaded SVG ERD: {erd_file_path}")
 
             except Exception as e:
-                logger.warning(f"Failed to generate/upload ERD: {e}")
+                logger.error(f"Failed to generate/upload ERD for {database.name}: {e}")
+                import traceback
+                logger.error(f"Full traceback:\n{traceback.format_exc()}")
                 # Don't fail the whole sync if ERD generation fails
 
             # Step 7: Update database record
@@ -602,7 +645,7 @@ def sync_all_databases(user, server, team, databases):
 
     progress_dialog.open()
 
-    # Create async task
+    # Run as async task in UI context (not background task!)
     async def run_sync_all():
         try:
             success_count = 0
@@ -612,22 +655,19 @@ def sync_all_databases(user, server, team, databases):
                 try:
                     logger.info(f"Syncing {idx}/{total_count}: {database.name}")
 
-                    # Update progress
+                    # Update progress - works because we're in UI context
                     status_label.text = f'Syncing {idx}/{total_count}: {database.name}'
                     progress_bar.value = (idx - 1) / total_count
                     await asyncio.sleep(0.1)
 
                     # Sync the database
-                    await sync_database(user, server, team, database, None, progress_label)
+                    await sync_database(user, server, team, database, None, None)
 
                     success_count += 1
-                    logger.info(f"✓ Success: {database.name}")
 
                 except Exception as e:
                     error_count += 1
                     logger.error(f"✗ Error syncing {database.name}: {e}")
-                    progress_label.text = f'Error: {database.name}'
-                    await asyncio.sleep(1)
 
             # Final progress
             progress_bar.value = 1.0
@@ -637,19 +677,17 @@ def sync_all_databases(user, server, team, databases):
 
             # Show result
             if error_count > 0:
-                Toast.warning(
-                    f'Synced {success_count}/{total_count} databases. {error_count} errors occurred.'
-                )
+                Toast.warning(f'Synced {success_count}/{total_count} databases. {error_count} errors.')
             else:
                 Toast.success(f'Successfully synced all {success_count} databases!')
 
         except Exception as e:
             logger.error(f"Bulk sync error: {e}")
             progress_dialog.close()
-            Toast.error(f'Error during bulk sync: {str(e)}')
+            Toast.error(f'Error: {str(e)}')
 
-    # Start background task
-    background_tasks.create(run_sync_all())
+    # Use asyncio.create_task instead of background_tasks
+    asyncio.create_task(run_sync_all())
 
 
 def toggle_database_exclusion(user, database, is_excluded, container):
@@ -687,6 +725,180 @@ def toggle_database_exclusion(user, database, is_excluded, container):
 
     except Exception as e:
         Toast.error(f'Error updating database status: {str(e)}')
+
+
+def show_json_viewer_from_sync(user, server, team, database):
+    """Show JSON viewer dialog - wrapper to call json_viewer function"""
+    from .json_viewer import show_json_viewer_dialog
+    show_json_viewer_dialog(user, server, team, database)
+
+
+def show_erd_viewer_dialog(user, server, team, database):
+    """Show ERD viewer dialog with SVG from GitHub"""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Create dialog
+    with ui.dialog().props('maximized') as dialog:
+        with ui.card().classes('w-full h-full'):
+            # Header
+            with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
+                with ui.column().classes('gap-1'):
+                    ui.label(f'ERD: {database.name}').classes('text-h5 font-bold')
+                    ui.label(f'{server.name} / {team.name}').classes('text-sm opacity-80')
+
+                with ui.row().classes('gap-2'):
+                    ui.button('Zoom In', icon='zoom_in', on_click=lambda: ui.run_javascript('if(window._erdPanZoom){window._erdPanZoom.zoomIn();}')).props('flat color=white')
+                    ui.button('Zoom Out', icon='zoom_out', on_click=lambda: ui.run_javascript('if(window._erdPanZoom){window._erdPanZoom.zoomOut();}')).props('flat color=white')
+                    ui.button('Reset', icon='center_focus_strong', on_click=lambda: ui.run_javascript('if(window._erdPanZoom){window._erdPanZoom.resetZoom();window._erdPanZoom.center();}')).props('flat color=white')
+                    ui.button('Fit', icon='fit_screen', on_click=lambda: ui.run_javascript('if(window._erdPanZoom){window._erdPanZoom.fit();window._erdPanZoom.center();}')).props('flat color=white')
+                    ui.button(icon='close', on_click=dialog.close).props('flat color=white')
+
+            # Content area with SVG pan zoom stage
+            with ui.column().classes('w-full').style('height: calc(100vh - 100px);'):
+                # Loading indicator
+                loading_container = ui.column().classes('w-full items-center gap-4 p-8')
+                with loading_container:
+                    ui.spinner(size='xl', color='primary')
+                    status_label = ui.label('Loading ERD from GitHub...').classes('text-h6')
+
+                # SVG container - create the stage HTML NOW before background task
+                svg_container = ui.column().classes('w-full h-full').style('display: none;')
+                with svg_container:
+                    erd_stage = ui.html('''
+                    <div id="erd-stage" style="width:100%;height:calc(100vh - 200px);border:1px solid #ccc;overflow:hidden;background:#fff;">
+                      <div id="erd-viewport" style="width:100%;height:100%;"></div>
+                    </div>
+                    ''', sanitize=False)
+
+                # Error container (initially hidden)
+                error_container = ui.column().classes('w-full').style('display: none;')
+
+    dialog.open()
+
+    # Load SVG in background - use context to access UI elements
+    from nicegui import context
+    client_context = context.client
+
+    async def load_svg():
+        try:
+            logger.info(f"Loading SVG ERD for {database.name} from GitHub...")
+
+            if not user.github_token_encrypted or not user.github_organization:
+                raise Exception("GitHub not configured")
+
+            # Access UI elements through the saved client context
+            with client_context:
+                status_label.text = 'Fetching ERD from GitHub...'
+            await asyncio.sleep(0.1)
+
+            encryption = get_encryption_manager()
+            github_token = encryption.decrypt(user.github_token_encrypted)
+            repo_name = get_repo_name_from_server(server)
+
+            github_mgr = GitHubManager(access_token=github_token, organization=user.github_organization)
+
+            logger.info(f"Looking for repository: {repo_name} in organization: {user.github_organization}")
+            repo = github_mgr.get_repository(repo_name)
+
+            if not repo:
+                # Try to list all repos to see what's available
+                all_repos = [r.name for r in github_mgr.list_repositories()[:10]]
+                logger.error(f"Repository '{repo_name}' not found. Available repos: {all_repos}")
+                raise Exception(f"Repository '{repo_name}' not found. Available: {', '.join(all_repos[:5])}")
+
+            db_name = sanitize_name(database.name)
+            erd_path = f'{database.github_path}/{db_name}-erd.svg'
+
+            with client_context:
+                status_label.text = f'Loading: {erd_path}...'
+            await asyncio.sleep(0.1)
+
+            content = github_mgr.get_file_content(repo, erd_path)
+            if not content:
+                raise Exception(f"ERD file not found. Please sync this database first to generate the ERD.")
+
+            # Hide loading, show SVG (containers already created)
+            with client_context:
+                loading_container.style('display: none;')
+                svg_container.style('display: block;')
+
+            # Inject SVG and initialize pan/zoom via JavaScript only
+            svg_escaped = content.replace('`', '\\`').replace('</script>', '<\\/script>')
+            init_script = f'''
+            // Load svg-pan-zoom library
+            if (typeof svgPanZoom === 'undefined') {{
+              const script = document.createElement('script');
+              script.src = 'https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js';
+              script.onload = function() {{ initErdViewer(); }};
+              document.head.appendChild(script);
+            }} else {{
+              initErdViewer();
+            }}
+
+            function initErdViewer() {{
+              const vp = document.getElementById('erd-viewport');
+              if (!vp) return;
+
+              vp.innerHTML = `{svg_escaped}`;
+              const svg = vp.querySelector('svg');
+              if (!svg) {{
+                vp.innerHTML = '<div style="padding:40px;color:#b00;">No SVG found</div>';
+                return;
+              }}
+
+              // Set SVG to fill container
+              svg.removeAttribute('width');
+              svg.removeAttribute('height');
+              svg.setAttribute('width', '100%');
+              svg.setAttribute('height', '100%');
+
+              // Destroy existing instance
+              if (window._erdPanZoom) {{
+                try {{ window._erdPanZoom.destroy(); }} catch(e) {{}}
+              }}
+
+              // Initialize svg-pan-zoom
+              window._erdPanZoom = svgPanZoom(svg, {{
+                zoomEnabled: true,
+                panEnabled: true,
+                controlIconsEnabled: false,
+                fit: true,
+                center: true,
+                minZoom: 0.1,
+                maxZoom: 50,
+                zoomScaleSensitivity: 0.3
+              }});
+
+              // Prevent default scroll
+              const stage = document.getElementById('erd-stage');
+              if (stage) {{
+                stage.addEventListener('wheel', ev => ev.preventDefault(), {{ passive: false }});
+              }}
+            }}
+            '''
+            # Run JavaScript within client context
+            with client_context:
+                ui.run_javascript(init_script)
+
+            logger.info(f"✓ SVG ERD loaded with pan/zoom: {len(content)} bytes")
+
+        except Exception as e:
+            logger.error(f"Error loading SVG: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+            # Use client context to update UI
+            with client_context:
+                loading_container.style('display: none;')
+                error_container.style('display: block;')
+                with error_container:
+                    with ui.card().classes('w-full p-4 bg-red-50'):
+                        ui.icon('error', size='lg').classes('text-negative')
+                        ui.label('Error Loading ERD').classes('text-h6 font-bold text-negative')
+                        ui.label(str(e)).classes('text-sm mt-2')
+
+    background_tasks.create(load_svg())
 
 
 def load_sync_history(user, team, container):
