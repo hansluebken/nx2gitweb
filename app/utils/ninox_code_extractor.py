@@ -158,8 +158,9 @@ def extract_code_from_structure(structure: Dict[str, Any], database_name: str = 
     for table_id, table_data in types.items():
         if not isinstance(table_data, dict):
             continue
-            
-        table_name = table_data.get('name', table_id)
+        
+        # Use caption first, then name, then ID as fallback
+        table_name = table_data.get('caption') or table_data.get('name') or table_id
         
         # Table-level triggers
         for code_field in ['afterCreate', 'afterUpdate', 'beforeDelete', 'onOpen', 'onClose']:
@@ -181,8 +182,9 @@ def extract_code_from_structure(structure: Dict[str, Any], database_name: str = 
         for field_id, field_data in fields.items():
             if not isinstance(field_data, dict):
                 continue
-                
-            field_name = field_data.get('name', field_id)
+            
+            # Use caption first, then name, then ID as fallback
+            field_name = field_data.get('caption') or field_data.get('name') or field_id
             
             for code_field in CODE_FIELDS:
                 if code_field in field_data:
@@ -206,8 +208,9 @@ def extract_code_from_structure(structure: Dict[str, Any], database_name: str = 
         for ui_id, ui_data in uis.items():
             if not isinstance(ui_data, dict):
                 continue
-                
-            ui_name = ui_data.get('name', ui_id)
+            
+            # Use caption first, then name, then ID as fallback
+            ui_name = ui_data.get('caption') or ui_data.get('name') or ui_id
             
             for code_field in ['beforeShow', 'onClick', 'onOpen', 'onClose']:
                 if code_field in ui_data:
