@@ -308,3 +308,251 @@ class NinoxClient:
             return True
         except Exception:
             return False
+    
+    # =========================================================================
+    # Views API - Ansichten einer Datenbank
+    # =========================================================================
+    
+    def get_views(self, team_id: str, database_id: str, full_view: bool = True) -> List[Dict]:
+        """
+        Holt alle Views (Ansichten) einer Datenbank
+        
+        Args:
+            team_id: ID des Teams
+            database_id: ID der Datenbank
+            full_view: Ob vollständige View-Daten geholt werden sollen (inkl. Konfiguration)
+        
+        Returns:
+            Liste der Views mit allen Eigenschaften
+        """
+        params = {}
+        if full_view:
+            params['fullView'] = 'true'
+        
+        result = self._make_request(
+            'GET',
+            f'/v1/teams/{team_id}/databases/{database_id}/views',
+            params=params
+        )
+        
+        if isinstance(result, list):
+            return result
+        return [result] if result else []
+    
+    def get_view(self, team_id: str, database_id: str, view_id: str) -> Dict:
+        """
+        Holt eine spezifische View
+        
+        Args:
+            team_id: ID des Teams
+            database_id: ID der Datenbank
+            view_id: ID der View
+        
+        Returns:
+            View-Details
+        """
+        return self._make_request(
+            'GET',
+            f'/v1/teams/{team_id}/databases/{database_id}/views/{view_id}'
+        )
+    
+    # =========================================================================
+    # Reports API - Berichte einer Datenbank
+    # =========================================================================
+    
+    def get_reports(self, team_id: str, database_id: str, full_report: bool = True) -> List[Dict]:
+        """
+        Holt alle Reports (Berichte) einer Datenbank
+        
+        Args:
+            team_id: ID des Teams
+            database_id: ID der Datenbank
+            full_report: Ob vollständige Report-Daten geholt werden sollen
+        
+        Returns:
+            Liste der Reports mit allen Eigenschaften
+        """
+        params = {}
+        if full_report:
+            params['fullReport'] = 'true'
+        
+        result = self._make_request(
+            'GET',
+            f'/v1/teams/{team_id}/databases/{database_id}/reports',
+            params=params
+        )
+        
+        if isinstance(result, list):
+            return result
+        return [result] if result else []
+    
+    def get_report(self, team_id: str, database_id: str, report_id: str) -> Dict:
+        """
+        Holt einen spezifischen Report
+        
+        Args:
+            team_id: ID des Teams
+            database_id: ID der Datenbank
+            report_id: ID des Reports
+        
+        Returns:
+            Report-Details
+        """
+        return self._make_request(
+            'GET',
+            f'/v1/teams/{team_id}/databases/{database_id}/reports/{report_id}'
+        )
+    
+    # =========================================================================
+    # Report Files API - Dateien eines Reports (z.B. Word/Excel-Vorlagen)
+    # =========================================================================
+    
+    def get_report_files(self, team_id: str, database_id: str, report_id: str) -> List[str]:
+        """
+        Listet alle Dateien eines Reports auf
+        
+        Args:
+            team_id: ID des Teams
+            database_id: ID der Datenbank
+            report_id: ID des Reports
+        
+        Returns:
+            Liste der Dateinamen
+        """
+        result = self._make_request(
+            'GET',
+            f'/v1/teams/{team_id}/databases/{database_id}/reports/{report_id}/files'
+        )
+        
+        if isinstance(result, list):
+            return result
+        return [result] if result else []
+    
+    def get_report_file(self, team_id: str, database_id: str, report_id: str, 
+                       file_name: str, as_base64: bool = True) -> str:
+        """
+        Holt eine spezifische Report-Datei
+        
+        Args:
+            team_id: ID des Teams
+            database_id: ID der Datenbank
+            report_id: ID des Reports
+            file_name: Name der Datei
+            as_base64: Ob die Datei als Base64-URL zurückgegeben werden soll
+        
+        Returns:
+            Dateiinhalt (als Base64-String wenn as_base64=True)
+        """
+        # Für Datei-Downloads müssen wir spezielle Header setzen
+        url = f"{self.base_url}/v1/teams/{team_id}/databases/{database_id}/reports/{report_id}/files/{file_name}"
+        
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Accept': '*/*'
+        }
+        
+        if as_base64:
+            headers['nx-file'] = 'base64url'
+        
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            
+            if as_base64:
+                return response.text
+            else:
+                return response.content
+                
+        except requests.exceptions.HTTPError as e:
+            error_msg = f"HTTP {e.response.status_code}: {e.response.text}"
+            raise requests.exceptions.HTTPError(error_msg)
+    
+    # =========================================================================
+    # Database Schema API - Erweitert mit Views und Reports
+    # =========================================================================
+    
+    def get_database_schema(self, team_id: str, database_id: str, 
+                           include_views_reports: bool = True) -> Dict:
+        """
+        Holt das vollständige Datenbankschema (wie im Updatemanager)
+        
+        Args:
+            team_id: ID des Teams
+            database_id: ID der Datenbank
+            include_views_reports: Ob Views und Reports inkludiert werden sollen
+        
+        Returns:
+            Vollständiges Schema mit Types, Views, Reports
+        """
+        params = {}
+        if include_views_reports:
+            params['includeReportsAndViews'] = 'true'
+        
+        return self._make_request(
+            'GET',
+            f'/v1/teams/{team_id}/databases/{database_id}/schema',
+            params=params
+        )
+    
+    def get_complete_database_backup(self, team_id: str, database_id: str, 
+                                     password: Optional[str] = None) -> Dict:
+        """
+        Erstellt ein vollständiges Backup einer Datenbank (wie im Updatemanager)
+        Inkludiert: Schema, Views, Reports und Report-Dateien
+        
+        Args:
+            team_id: ID des Teams
+            database_id: ID der Datenbank
+            password: Passwort für geschützte Datenbanken (optional)
+        
+        Returns:
+            Vollständiges Backup mit allen Komponenten:
+            {
+                'schema': {...},
+                'views': [...],
+                'reports': [...],
+                'report_files': {report_id: [file_names]}
+            }
+        """
+        backup = {
+            'schema': None,
+            'views': [],
+            'reports': [],
+            'report_files': {}
+        }
+        
+        # 1. Schema holen (mit Views und Reports wenn möglich)
+        try:
+            backup['schema'] = self.get_database_schema(team_id, database_id, include_views_reports=True)
+        except Exception:
+            # Fallback: Nur Struktur ohne Views/Reports
+            backup['schema'] = self.get_database_structure(team_id, database_id)
+        
+        # 2. Views separat holen (für vollständige Daten)
+        try:
+            backup['views'] = self.get_views(team_id, database_id, full_view=True)
+        except Exception as e:
+            # Views könnten nicht verfügbar sein
+            backup['views'] = []
+            backup['views_error'] = str(e)
+        
+        # 3. Reports holen
+        try:
+            backup['reports'] = self.get_reports(team_id, database_id, full_report=True)
+            
+            # 4. Report-Dateien für jeden Report auflisten
+            for report in backup['reports']:
+                report_id = report.get('id')
+                if report_id:
+                    try:
+                        files = self.get_report_files(team_id, database_id, report_id)
+                        if files:
+                            backup['report_files'][report_id] = files
+                    except Exception:
+                        pass  # Report hat keine Dateien
+                        
+        except Exception as e:
+            backup['reports'] = []
+            backup['reports_error'] = str(e)
+        
+        return backup

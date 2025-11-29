@@ -420,7 +420,7 @@ def handle_sync_click(user, server, team, database, container, button):
 
 
 async def sync_database(user, server, team, database, container, progress_label=None):
-    """Sync a single database"""
+    """Sync a single database - includes Schema, Views, Reports, and Report Files"""
     import logging
     logger = logging.getLogger(__name__)
 
@@ -458,6 +458,71 @@ async def sync_database(user, server, team, database, container, progress_label=
         )
         logger.info(f"Structure fetched: {len(str(db_structure))} chars")
 
+        # Step 3b: Fetch Views (Ansichten)
+        if progress_label:
+            progress_label.text = 'Downloading views...'
+            await asyncio.sleep(0.1)
+
+        views_data = []
+        try:
+            logger.info(f"Fetching views from Ninox...")
+            views_data = await loop.run_in_executor(
+                None,
+                client.get_views,
+                team.team_id,
+                database.database_id,
+                True  # full_view=True
+            )
+            logger.info(f"Views fetched: {len(views_data)} views")
+        except Exception as e:
+            logger.warning(f"Could not fetch views: {e}")
+            views_data = []
+
+        # Step 3c: Fetch Reports (Berichte)
+        if progress_label:
+            progress_label.text = 'Downloading reports...'
+            await asyncio.sleep(0.1)
+
+        reports_data = []
+        report_files_data = {}
+        try:
+            logger.info(f"Fetching reports from Ninox...")
+            reports_data = await loop.run_in_executor(
+                None,
+                client.get_reports,
+                team.team_id,
+                database.database_id,
+                True  # full_report=True
+            )
+            logger.info(f"Reports fetched: {len(reports_data)} reports")
+
+            # Step 3d: Fetch Report Files for each report
+            if reports_data:
+                if progress_label:
+                    progress_label.text = 'Downloading report files...'
+                    await asyncio.sleep(0.1)
+
+                for report in reports_data:
+                    report_id = report.get('id')
+                    if report_id:
+                        try:
+                            files = await loop.run_in_executor(
+                                None,
+                                client.get_report_files,
+                                team.team_id,
+                                database.database_id,
+                                str(report_id)
+                            )
+                            if files:
+                                report_files_data[str(report_id)] = files
+                                logger.info(f"Report {report_id} has {len(files)} files")
+                        except Exception as e:
+                            logger.warning(f"Could not fetch files for report {report_id}: {e}")
+
+        except Exception as e:
+            logger.warning(f"Could not fetch reports: {e}")
+            reports_data = []
+
         # Check if GitHub is configured (now in user, not server)
         if user.github_token_encrypted and user.github_organization:
             if progress_label:
@@ -494,17 +559,36 @@ async def sync_database(user, server, team, database, container, progress_label=
             file_name = f'{db_name}-structure.json'
             full_path = f'{github_path}/{file_name}'
 
-            # Step 5: Convert to JSON
+            # Step 5: Convert to JSON and create complete backup object
             if progress_label:
                 progress_label.text = 'Converting to JSON format...'
                 await asyncio.sleep(0.1)
 
+            # Create complete backup structure (like Updatemanager)
+            complete_backup = {
+                'schema': db_structure,
+                'views': views_data,
+                'reports': reports_data,
+                'report_files': report_files_data,
+                '_metadata': {
+                    'synced_at': datetime.utcnow().isoformat(),
+                    'database_name': database.name,
+                    'database_id': database.database_id,
+                    'team_name': team.name,
+                    'team_id': team.team_id,
+                    'server_name': server.name,
+                    'views_count': len(views_data),
+                    'reports_count': len(reports_data),
+                    'report_files_count': sum(len(f) for f in report_files_data.values())
+                }
+            }
+
             structure_json = json.dumps(db_structure, indent=2, ensure_ascii=False)
             logger.info(f"JSON size: {len(structure_json)} bytes")
 
-            # Step 6: Upload to GitHub
+            # Step 6: Upload structure to GitHub
             if progress_label:
-                progress_label.text = f'Uploading to GitHub: {full_path}...'
+                progress_label.text = f'Uploading structure to GitHub: {full_path}...'
                 await asyncio.sleep(0.1)
 
             # Upload to GitHub in executor
@@ -518,7 +602,72 @@ async def sync_database(user, server, team, database, container, progress_label=
             )
             logger.info(f"Uploaded to GitHub: {full_path}")
 
-            # Step 6b: Generate and upload SVG ERD diagram
+            # Step 6b: Upload Views if available
+            if views_data:
+                if progress_label:
+                    progress_label.text = 'Uploading views...'
+                    await asyncio.sleep(0.1)
+
+                views_path = f'{github_path}/{db_name}-views.json'
+                views_json = json.dumps(views_data, indent=2, ensure_ascii=False)
+                
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        github_mgr.update_file,
+                        repo,
+                        views_path,
+                        views_json,
+                        f'Update {database.name} views'
+                    )
+                    logger.info(f"Uploaded views to GitHub: {views_path}")
+                except Exception as e:
+                    logger.error(f"Failed to upload views: {e}")
+
+            # Step 6c: Upload Reports if available
+            if reports_data:
+                if progress_label:
+                    progress_label.text = 'Uploading reports...'
+                    await asyncio.sleep(0.1)
+
+                reports_path = f'{github_path}/{db_name}-reports.json'
+                reports_json = json.dumps(reports_data, indent=2, ensure_ascii=False)
+                
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        github_mgr.update_file,
+                        repo,
+                        reports_path,
+                        reports_json,
+                        f'Update {database.name} reports'
+                    )
+                    logger.info(f"Uploaded reports to GitHub: {reports_path}")
+                except Exception as e:
+                    logger.error(f"Failed to upload reports: {e}")
+
+            # Step 6d: Upload complete backup JSON
+            if progress_label:
+                progress_label.text = 'Uploading complete backup...'
+                await asyncio.sleep(0.1)
+
+            backup_path = f'{github_path}/{db_name}-complete-backup.json'
+            backup_json = json.dumps(complete_backup, indent=2, ensure_ascii=False)
+            
+            try:
+                await loop.run_in_executor(
+                    None,
+                    github_mgr.update_file,
+                    repo,
+                    backup_path,
+                    backup_json,
+                    f'Update {database.name} complete backup (schema + views + reports)'
+                )
+                logger.info(f"Uploaded complete backup to GitHub: {backup_path}")
+            except Exception as e:
+                logger.error(f"Failed to upload complete backup: {e}")
+
+            # Step 6e: Generate and upload SVG ERD diagram
             if progress_label:
                 progress_label.text = 'Generating ERD diagram...'
                 await asyncio.sleep(0.1)
@@ -569,14 +718,22 @@ async def sync_database(user, server, team, database, container, progress_label=
             db_obj.last_modified = datetime.utcnow()
             db.commit()
 
-            # Create audit log
+            # Create detailed audit log
+            sync_details = f'Synced database "{database.name}" to GitHub at {full_path}'
+            if views_data:
+                sync_details += f' | {len(views_data)} views'
+            if reports_data:
+                sync_details += f' | {len(reports_data)} reports'
+            if report_files_data:
+                sync_details += f' | {sum(len(f) for f in report_files_data.values())} report files'
+
             create_audit_log(
                 db=db,
                 user_id=user.id,
                 action='database_synced',
                 resource_type='database',
                 resource_id=database.id,
-                details=f'Synced database "{database.name}" to GitHub at {full_path}',
+                details=sync_details,
                 auto_commit=True
             )
 
