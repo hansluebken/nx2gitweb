@@ -57,6 +57,7 @@ services:
       - ./app:/app/app  # Mount app code for live updates
       - ./data/keys:/app/data/keys
       - ./data/logs:/app/data/logs
+      - ./data/code:/app/data/code  # Ninox code files (persistent)
     # ports:
     #   - "8765:8765"  # Uncomment for direct access during testing
     networks:

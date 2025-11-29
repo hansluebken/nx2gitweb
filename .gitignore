@@ -88,3 +88,4 @@ temp/
 
 # NiceGUI storage
 .nicegui/
+data/code/

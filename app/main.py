@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 from .database import init_db, get_db
 from .auth import create_admin_user, get_user_from_token, InvalidTokenError
-from .ui import login, dashboard, servers, teams, sync, admin, profile, cronjobs, json_viewer
+from .ui import login, dashboard, servers, teams, sync, admin, profile, cronjobs, json_viewer, code_viewer
 from .services.cronjob_scheduler import get_scheduler
 
 # Configure logging
@@ -278,6 +278,27 @@ def json_viewer_page():
         return
 
     json_viewer.render(user)
+
+
+@ui.page('/code-viewer')
+def code_viewer_page():
+    """Ninox Code Viewer page"""
+    token = app.storage.user.get(SESSION_TOKEN_KEY)
+    if not token:
+        ui.navigate.to('/login')
+        return
+
+    try:
+        db = get_db()
+        user = get_user_from_token(db, token)
+        db.close()
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        app.storage.user.pop(SESSION_TOKEN_KEY, None)
+        ui.navigate.to('/login')
+        return
+
+    code_viewer.render(user)
 
 
 @ui.page('/logout')

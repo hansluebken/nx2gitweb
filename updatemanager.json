@@ -1,0 +1,245 @@
+{
+  "settings": {
+    "name": "Hagedorn Updatemanager",
+    "icon": "database",
+    "color": "#9da9ce",
+    "lock": false
+  },
+  "schema": {
+    "seq": 0,
+    "version": 1421,
+    "nextTypeId": 28,
+    "types": {
+      "A": {
+        "nextFieldId": 24,
+        "caption": "tbl_Accounts",
+        "captions": {},
+        "hidden": true,
+        "fields": {
+          "A": {
+            "base": "string",
+            "caption": "Account name",
+            "captions": {},
+            "required": false,
+            "order": 1,
+            "width": 2,
+            "formWidth": 0.5,
+            "uuid": "dZvWH9Qvhx737ipO",
+            "globalSearch": true,
+            "hasIndex": false,
+            "tooltips": {},
+            "stringAutocorrect": true,
+            "stringMultiline": false,
+            "height": 1
+          },
+          "B": {
+            "base": "string",
+            "caption": "Host",
+            "captions": {},
+            "required": false,
+            "order": 3,
+            "visibility": "'Cloud Type' = 2",
+            "width": 2,
+            "formWidth": 0.5,
+            "uuid": "fZuL5zGgCWAa3Dcu",
+            "globalSearch": true,
+            "hasIndex": false,
+            "tooltips": {},
+            "stringDefault": "https://api.ninox.com",
+            "stringAutocorrect": true,
+            "stringMultiline": false,
+            "height": 1
+          },
+          "C": {
+            "base": "string",
+            "caption": "API Key",
+            "captions": {},
+            "required": false,
+            "order": 4,
+            "width": 2,
+            "formWidth": 0.5,
+            "uuid": "agaxT8lIQRAsoX9B",
+            "globalSearch": true,
+            "hasIndex": false,
+            "tooltips": {},
+            "stringAutocorrect": true,
+            "stringMultiline": false,
+            "height": 1
+          },
+          "D": {
+            "base": "rev",
+            "caption": "Workspaces",
+            "captions": {},
+            "refTypeId": "B",
+            "refFieldId": "C",
+            "order": 10,
+            "viewConfig": {
+              "type": "B",
+              "sort": 0,
+              "descending": false,
+              "cols": [
+                {
+                  "expression": "_id",
+                  "width": 50,
+                  "agg": "cnt"
+                },
+                {
+                  "expression": "A",
+                  "width": 230
+                },
+                {
+                  "expression": "B",
+                  "width": 1077
+                }
+              ]
+            },
+            "uuid": "cruka0aTJvhFFNNZ",
+            "height": 6,
+            "formWidth": 1,
+            "reverseRenderer": "table",
+            "tooltips": {}
+          },
+          "E": {
+            "base": "choice",
+            "caption": "Cloud Type",
+            "captions": {},
+            "required": false,
+            "order": 2,
+            "afterUpdate": "Host := if 'Cloud Type' = 1 then\n\t\t\"https://api.ninox.com\"\n\telse\n\t\tnull\n\tend",
+            "width": 2,
+            "formWidth": 0.5,
+            "uuid": "LMpzGSIjhfVJAdL2",
+            "globalSearch": true,
+            "hasIndex": false,
+            "tooltips": {},
+            "nextChoiceId": 3,
+            "values": {
+              "1": {
+                "caption": "Public cloud",
+                "captions": {},
+                "order": 0
+              },
+              "2": {
+                "caption": "Private cloud / on Premisses",
+                "captions": {},
+                "order": 1
+              }
+            },
+            "choiceRenderer": "combo"
+          },
+          "T": {
+            "base": "string",
+            "caption": "Text",
+            "captions": {},
+            "required": false,
+            "order": 11,
+            "formWidth": 0.5,
+            "uuid": "LYuJ8Ew193hL6YQ4",
+            "globalSearch": true,
+            "hasIndex": false,
+            "tooltips": {},
+            "stringAutocorrect": true,
+            "stringMultiline": false,
+            "height": 1
+          }
+        },
+        "uis": {
+          "I": {
+            "base": "br",
+            "order": 7,
+            "caption": "Zeilenumbruch",
+            "captions": {},
+            "uuid": "yVM19rNklubqsuFp",
+            "formWidth": 1,
+            "tooltips": {}
+          },
+          "J": {
+            "base": "button",
+            "order": 6,
+            "caption": "Check workspaces",
+            "captions": {},
+            "uuid": "wGZH7IJxGRcLfylZ",
+            "width": 1,
+            "formWidth": 0.25,
+            "tooltips": {},
+            "fn": "let response := do as transaction\n\t\tsetWorkspaces(this)\n\tend;\nalert(response)",
+            "buttonColor": "blue"
+          },
+          "N": {
+            "base": "br",
+            "order": 5,
+            "caption": "Zeilenumbruch",
+            "captions": {},
+            "uuid": "CZQvVLjsJmvWxQh7",
+            "formWidth": 1,
+            "tooltips": {}
+          },
+          "S": {
+            "base": "tab",
+            "order": 9,
+            "caption": "Admin",
+            "captions": {},
+            "uuid": "oZeqwGfqnVoJRJXE",
+            "formWidth": 1,
+            "visibility": "isAdminMode()",
+            "tooltips": {}
+          },
+          "V": {
+            "base": "view",
+            "order": 8,
+            "caption": "Accounts",
+            "captions": {},
+            "uuid": "LwCwUfwPWrqPqpXy",
+            "formWidth": 1,
+            "tooltips": {},
+            "fn": "Workspaces",
+            "viewConfig": {
+              "type": "B",
+              "sort": 0,
+              "descending": false,
+              "cols": [
+                {
+                  "expression": "A",
+                  "width": 290
+                },
+                {
+                  "expression": "join(D.A,\" | \")",
+                  "width": 1407,
+                  "caption": "Databases"
+                }
+              ]
+            },
+            "height": 9
+          },
+          "W": {
+            "base": "tab",
+            "order": 0,
+            "caption": "Account data",
+            "captions": {},
+            "uuid": "tJlxs9KvufV09ZdI",
+            "formWidth": 1,
+            "tooltips": {}
+          }
+        },
+        "uuid": "f85wVeiAL1o7BWBg",
+        "globalSearch": true,
+        "allowPrint": true,
+        "allowRecordNavigation": true,
+        "allowRecordActions": true,
+        "order": 11,
+        "kind": "table"
+      }
+    },
+    "afterOpenBehavior": "restoreNavigation",
+    "globalCode": "function formatJSONString(jsonString : text,indentation : number) do\n\tvar result := \"\";\n\tvar level := 0;\n\tlet inQuotes := false;\n\tlet lineBreak := \"\n\";\n\tfor i in range(0, length(jsonString)) do\n\t\tlet char := substring(jsonString, i, i + 1);\n\t\tif char = \"\"\"\" then\n\t\t\tinQuotes := not inQuotes\n\t\tend;\n\t\tif not inQuotes then\n\t\t\tif char = \"{\" or char = \"[\" then\n\t\t\t\tlevel := level + 1;\n\t\t\t\tresult := result + char + lineBreak + lpad(\"\", level * indentation, \" \")\n\t\t\telse\n\t\t\t\tif char = \"}\" or char = \"]\" then\n\t\t\t\t\tlevel := level - 1;\n\t\t\t\t\tresult := result + lineBreak + lpad(\"\", level * indentation, \" \") + char\n\t\t\t\telse\n\t\t\t\t\tif char = \",\" then\n\t\t\t\t\t\tresult := result + char + lineBreak + lpad(\"\", level * indentation, \" \")\n\t\t\t\t\telse\n\t\t\t\t\t\tif char = \":\" then\n\t\t\t\t\t\t\tresult := result + char + \" \"\n\t\t\t\t\t\telse\n\t\t\t\t\t\t\tresult := result + char\n\t\t\t\t\t\tend\n\t\t\t\t\tend\n\t\t\t\tend\n\t\t\tend\n\t\telse\n\t\t\tresult := result + char\n\t\tend\n\tend;\n\tresult\nend;",
+    "fileSync": "full",
+    "dateFix": "enabled",
+    "compatibility": "latest",
+    "hideCalendar": true,
+    "hideSearch": true,
+    "hideDatabase": true,
+    "hideNavigation": false,
+    "knownDatabases": [],
+    "serverSideReadableIf": "disabled"
+  }
+}

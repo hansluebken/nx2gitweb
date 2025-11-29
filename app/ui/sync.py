@@ -708,7 +708,7 @@ async def sync_database(user, server, team, database, container, progress_label=
                 logger.error(f"Full traceback:\n{traceback.format_exc()}")
                 # Don't fail the whole sync if ERD generation fails
 
-            # Step 6f: Extract and upload Ninox code files
+            # Step 6f: Extract and save Ninox code files LOCALLY (not to GitHub)
             code_files_count = 0
             if progress_label:
                 progress_label.text = 'Extracting Ninox code...'
@@ -722,33 +722,37 @@ async def sync_database(user, server, team, database, container, progress_label=
                 
                 if code_files:
                     code_files_count = len(code_files)
-                    logger.info(f"Found {code_files_count} code files to upload")
+                    logger.info(f"Found {code_files_count} code files to save locally")
                     
                     if progress_label:
-                        progress_label.text = f'Uploading {code_files_count} code files...'
+                        progress_label.text = f'Saving {code_files_count} code files...'
                         await asyncio.sleep(0.1)
                     
-                    # Upload each code file
-                    for file_path, file_content in code_files.items():
-                        full_code_path = f'{github_path}/{file_path}'
-                        try:
-                            await loop.run_in_executor(
-                                None,
-                                github_mgr.update_file,
-                                repo,
-                                full_code_path,
-                                file_content,
-                                f'Update {database.name} code: {file_path}'
-                            )
-                        except Exception as file_error:
-                            logger.warning(f"Failed to upload {full_code_path}: {file_error}")
+                    # Save code files locally instead of uploading to GitHub
+                    import os
+                    server_name = sanitize_name(server.name)
+                    team_name_safe = sanitize_name(team.name)
                     
-                    logger.info(f"Uploaded {code_files_count} code files")
+                    # Base path for code storage
+                    code_base_path = f'/app/data/code/{server_name}/{team_name_safe}/{db_name}'
+                    
+                    # Save each code file locally
+                    for file_path, file_content in code_files.items():
+                        full_local_path = f'{code_base_path}/{file_path}'
+                        
+                        # Create directory if needed
+                        os.makedirs(os.path.dirname(full_local_path), exist_ok=True)
+                        
+                        # Write file
+                        with open(full_local_path, 'w', encoding='utf-8') as f:
+                            f.write(file_content)
+                    
+                    logger.info(f"Saved {code_files_count} code files to {code_base_path}")
                 else:
                     logger.info(f"No code found in {database.name}")
 
             except Exception as e:
-                logger.error(f"Failed to extract/upload code for {database.name}: {e}")
+                logger.error(f"Failed to extract/save code for {database.name}: {e}")
                 import traceback
                 logger.error(f"Full traceback:\n{traceback.format_exc()}")
                 # Don't fail the whole sync if code extraction fails
