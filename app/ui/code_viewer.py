@@ -59,7 +59,7 @@ def render(user):
                 # Code content with line numbers
                 code_container = ui.column().classes('w-full')
                 with code_container:
-                    code_display = ui.html('').classes('w-full')
+                    code_display = ui.html('', sanitize=False).classes('w-full')
         
         # Load file tree
         load_file_tree(user, file_tree_container, code_title, code_path_label, code_display)
