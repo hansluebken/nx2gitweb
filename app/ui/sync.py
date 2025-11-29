@@ -14,6 +14,7 @@ from ..auth import create_audit_log
 from ..utils.encryption import get_encryption_manager
 from ..utils.github_utils import sanitize_name, get_repo_name_from_server
 from ..utils.svg_erd_generator import generate_svg_erd
+from ..utils.ninox_code_extractor import extract_and_generate as extract_ninox_code
 from ..api.ninox_client import NinoxClient
 from ..api.github_manager import GitHubManager
 from .components import (
@@ -707,6 +708,51 @@ async def sync_database(user, server, team, database, container, progress_label=
                 logger.error(f"Full traceback:\n{traceback.format_exc()}")
                 # Don't fail the whole sync if ERD generation fails
 
+            # Step 6f: Extract and upload Ninox code files
+            code_files_count = 0
+            if progress_label:
+                progress_label.text = 'Extracting Ninox code...'
+                await asyncio.sleep(0.1)
+
+            try:
+                logger.info(f"Extracting Ninox code for {database.name}...")
+                
+                # Extract code from structure
+                code_files = extract_ninox_code(db_structure, database.name)
+                
+                if code_files:
+                    code_files_count = len(code_files)
+                    logger.info(f"Found {code_files_count} code files to upload")
+                    
+                    if progress_label:
+                        progress_label.text = f'Uploading {code_files_count} code files...'
+                        await asyncio.sleep(0.1)
+                    
+                    # Upload each code file
+                    for file_path, file_content in code_files.items():
+                        full_code_path = f'{github_path}/{file_path}'
+                        try:
+                            await loop.run_in_executor(
+                                None,
+                                github_mgr.update_file,
+                                repo,
+                                full_code_path,
+                                file_content,
+                                f'Update {database.name} code: {file_path}'
+                            )
+                        except Exception as file_error:
+                            logger.warning(f"Failed to upload {full_code_path}: {file_error}")
+                    
+                    logger.info(f"Uploaded {code_files_count} code files")
+                else:
+                    logger.info(f"No code found in {database.name}")
+
+            except Exception as e:
+                logger.error(f"Failed to extract/upload code for {database.name}: {e}")
+                import traceback
+                logger.error(f"Full traceback:\n{traceback.format_exc()}")
+                # Don't fail the whole sync if code extraction fails
+
             # Step 7: Update database record
             if progress_label:
                 progress_label.text = 'Updating database record...'
@@ -726,6 +772,8 @@ async def sync_database(user, server, team, database, container, progress_label=
                 sync_details += f' | {len(reports_data)} reports'
             if report_files_data:
                 sync_details += f' | {sum(len(f) for f in report_files_data.values())} report files'
+            if code_files_count > 0:
+                sync_details += f' | {code_files_count} code files'
 
             create_audit_log(
                 db=db,
