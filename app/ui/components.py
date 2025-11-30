@@ -70,7 +70,7 @@ class NavHeader:
                 self._nav_dropdown('', 'settings', settings_items, settings_pages, icon_only=True)
 
                 # User menu
-                with ui.button(icon='account_circle', color='white').props('flat'):
+                with ui.button(icon='account_circle').props('flat').classes('text-white'):
                     with ui.menu():
                         ui.menu_item(
                             f'{self.user.full_name or self.user.username}',
