@@ -232,63 +232,30 @@ Für diese Option muss das `proxy-network` existieren (siehe Voraussetzungen).
 
 Falls Sie NGINX direkt auf dem Host installiert haben (nicht als Docker-Container):
 
-1. **Port freigeben** - Bearbeiten Sie `docker-compose.yml`:
+1. **Alternative docker-compose verwenden**:
+
+```bash
+# Statt der Standard docker-compose.yml:
+docker-compose -f docker-compose.host-nginx.yml up -d --build
+```
+
+Oder manuell in `docker-compose.yml` den Port freigeben:
 
 ```yaml
 webapp:
-  # ... andere Konfiguration ...
   ports:
     - "127.0.0.1:8765:8765"  # Nur lokal erreichbar
 ```
 
-2. **NGINX Konfiguration erstellen**:
+2. **NGINX Konfiguration kopieren**:
 
 ```bash
+# Beispielkonfiguration kopieren
+sudo cp docs/nginx-host-example.conf /etc/nginx/sites-available/nx2git
+
+# Domain anpassen
 sudo nano /etc/nginx/sites-available/nx2git
-```
-
-```nginx
-server {
-    listen 80;
-    server_name nx2git.ihre-domain.de;
-    
-    # Redirect to HTTPS
-    return 301 https://$server_name$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name nx2git.ihre-domain.de;
-
-    # SSL Zertifikate (Let's Encrypt)
-    ssl_certificate /etc/letsencrypt/live/nx2git.ihre-domain.de/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/nx2git.ihre-domain.de/privkey.pem;
-    
-    # SSL Einstellungen
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
-    ssl_prefer_server_ciphers off;
-
-    # Proxy zu NiceGUI
-    location / {
-        proxy_pass http://127.0.0.1:8765;
-        proxy_http_version 1.1;
-        
-        # WebSocket Support (wichtig für NiceGUI!)
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        
-        # Header
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # Timeouts für WebSockets
-        proxy_read_timeout 86400;
-        proxy_send_timeout 86400;
-    }
-}
+# Ersetze "nx2git.ihre-domain.de" durch Ihre Domain
 ```
 
 3. **Konfiguration aktivieren**:
@@ -304,11 +271,20 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-4. **SSL-Zertifikat erstellen** (falls noch nicht vorhanden):
+4. **SSL-Zertifikat mit certbot erstellen**:
 
 ```bash
+# Certbot installieren (falls nicht vorhanden)
+sudo apt install certbot python3-certbot-nginx
+
+# Zertifikat erstellen - certbot konfiguriert NGINX automatisch
 sudo certbot --nginx -d nx2git.ihre-domain.de
 ```
+
+Certbot wird automatisch:
+- SSL-Zertifikate erstellen und einbinden
+- HTTPS-Redirect konfigurieren
+- Automatische Erneuerung einrichten
 
 ---
 
