@@ -55,8 +55,7 @@ class NavHeader:
                     ('Code', '/code-viewer', 'code'),
                     ('JSON', '/json-viewer', 'data_object'),
                     ('Änderungen', '/changes', 'history'),
-                    ('Chat', '/chat', 'chat'),
-                ], ['code-viewer', 'json-viewer', 'changes', 'chat'])
+                ], ['code-viewer', 'json-viewer', 'changes'])
                 
                 # Einstellungen Dropdown (mit Cronjobs und Admin)
                 settings_items = [
