@@ -26,6 +26,7 @@ class UserDTO:
     auth_provider: str = 'local'
     google_id: Optional[str] = None
     avatar_url: Optional[str] = None
+    google_refresh_token_encrypted: Optional[str] = None
 
     @classmethod
     def from_model(cls, user):
@@ -75,6 +76,7 @@ class UserDTO:
             auth_provider = getattr(user, 'auth_provider', 'local') or 'local'
             google_id = getattr(user, 'google_id', None)
             avatar_url = getattr(user, 'avatar_url', None)
+            google_refresh_token_encrypted = getattr(user, 'google_refresh_token_encrypted', None)
 
             logger.info("UserDTO.from_model: Creating DTO object...")
             # Now safely copy the values
@@ -91,7 +93,8 @@ class UserDTO:
                 github_default_repo=github_default_repo,
                 auth_provider=auth_provider,
                 google_id=google_id,
-                avatar_url=avatar_url
+                avatar_url=avatar_url,
+                google_refresh_token_encrypted=google_refresh_token_encrypted
             )
         except Exception as e:
             logger.error(f"UserDTO.from_model ERROR: {type(e).__name__}: {e}")

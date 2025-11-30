@@ -184,6 +184,37 @@ def render_oauth_config(user):
                             'wenn sie sich zum ersten Mal mit Google anmelden und ihre Domain erlaubt ist.'
                         ).classes('text-sm text-grey-6 mb-4')
                         
+                        ui.separator().classes('my-4')
+                        
+                        # Google Drive Section
+                        ui.label('Google Drive Integration').classes('text-h6 font-bold mb-2')
+                        ui.label(
+                            'Ermöglicht OAuth-Benutzern, JSON-Dateien als Google Docs in einen Shared Drive hochzuladen.'
+                        ).classes('text-sm text-grey-6 mb-4')
+                        
+                        drive_enabled_switch = ui.switch(
+                            'Google Drive aktiviert',
+                            value=getattr(config, 'drive_enabled', False)
+                        ).classes('mb-2')
+                        
+                        drive_folder_input = ui.input(
+                            label='Shared Drive Name',
+                            value=getattr(config, 'drive_shared_folder_name', '') or '',
+                            placeholder='ninox2git'
+                        ).classes('w-full mb-2')
+                        
+                        ui.label(
+                            'Der Name des Shared Drives in Google Drive. '
+                            'Ordnerstruktur wird automatisch erstellt: server/team/datenbank/komplett.json'
+                        ).classes('text-sm text-grey-6 mb-2')
+                        
+                        with ui.card().classes('w-full p-3 bg-amber-50 mb-4'):
+                            ui.label('Wichtig: Google APIs aktivieren').classes('font-bold text-sm')
+                            with ui.column().classes('gap-1 text-xs'):
+                                ui.label('In der Google Cloud Console müssen aktiviert sein:')
+                                ui.label('- Google Drive API')
+                                ui.label('- Google Docs API')
+                        
                         # Save button
                         async def save_config():
                             db = get_db()
@@ -203,6 +234,10 @@ def render_oauth_config(user):
                                 config.allowed_domains = allowed_domains_input.value.strip() or None
                                 config.auto_create_users = auto_create_switch.value
                                 config.redirect_uri = redirect_uri
+                                
+                                # Drive settings
+                                config.drive_enabled = drive_enabled_switch.value
+                                config.drive_shared_folder_name = drive_folder_input.value.strip() or None
                                 
                                 db.commit()
                                 

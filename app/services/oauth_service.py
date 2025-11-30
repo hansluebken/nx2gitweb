@@ -18,11 +18,20 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 
-# Scopes we need
-GOOGLE_SCOPES = [
+# Basic scopes for authentication
+GOOGLE_SCOPES_BASIC = [
     "openid",
     "email",
     "profile",
+]
+
+# Extended scopes including Drive access
+GOOGLE_SCOPES_WITH_DRIVE = [
+    "openid",
+    "email",
+    "profile",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/documents",
 ]
 
 
@@ -36,6 +45,7 @@ class GoogleUserInfo:
     family_name: Optional[str]
     picture: Optional[str]
     verified_email: bool
+    refresh_token: Optional[str] = None  # For Drive API access
 
 
 class OAuthError(Exception):
@@ -72,12 +82,13 @@ class OAuthService:
         # In-memory state storage (in production, use Redis or DB)
         self._states: Dict[str, bool] = {}
     
-    def generate_auth_url(self, state: Optional[str] = None) -> Tuple[str, str]:
+    def generate_auth_url(self, state: Optional[str] = None, include_drive: bool = False) -> Tuple[str, str]:
         """
         Generate Google OAuth authorization URL
         
         Args:
             state: Optional state parameter (will be generated if not provided)
+            include_drive: Whether to include Drive/Docs scopes
             
         Returns:
             Tuple of (auth_url, state)
@@ -88,18 +99,21 @@ class OAuthService:
         # Store state for validation
         self._states[state] = True
         
+        # Select scopes based on whether Drive is enabled
+        scopes = GOOGLE_SCOPES_WITH_DRIVE if include_drive else GOOGLE_SCOPES_BASIC
+        
         params = {
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
             "response_type": "code",
-            "scope": " ".join(GOOGLE_SCOPES),
+            "scope": " ".join(scopes),
             "state": state,
             "access_type": "offline",
-            "prompt": "select_account",  # Always show account chooser
+            "prompt": "consent",  # Force consent to get refresh token
         }
         
         auth_url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
-        logger.info(f"Generated Google OAuth URL with state: {state[:8]}...")
+        logger.info(f"Generated Google OAuth URL with state: {state[:8]}... (drive={include_drive})")
         
         return auth_url, state
     
@@ -189,15 +203,20 @@ class OAuthService:
             code: Authorization code from callback
             
         Returns:
-            GoogleUserInfo object
+            GoogleUserInfo object (includes refresh_token if available)
         """
         tokens = await self.exchange_code_for_tokens(code)
         access_token = tokens.get("access_token")
+        refresh_token = tokens.get("refresh_token")  # Only returned on first auth with consent
         
         if not access_token:
             raise OAuthError("No access token in response")
         
-        return await self.get_user_info(access_token)
+        user_info = await self.get_user_info(access_token)
+        user_info.refresh_token = refresh_token
+        
+        logger.info(f"Authentication complete, refresh_token={'yes' if refresh_token else 'no'}")
+        return user_info
 
 
 def get_oauth_service() -> Optional[OAuthService]:

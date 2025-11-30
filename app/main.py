@@ -330,6 +330,7 @@ def changes_page():
 async def google_auth_start():
     """Start Google OAuth flow - redirects to Google"""
     from .services.oauth_service import get_oauth_service
+    from .services.drive_service import is_drive_enabled
     
     oauth_service = get_oauth_service()
     if not oauth_service:
@@ -337,8 +338,11 @@ async def google_auth_start():
         ui.navigate.to('/login')
         return
     
+    # Check if Drive is enabled - if so, include Drive scopes
+    include_drive = is_drive_enabled()
+    
     # Generate auth URL and redirect
-    auth_url, state = oauth_service.generate_auth_url()
+    auth_url, state = oauth_service.generate_auth_url(include_drive=include_drive)
     
     # Store state in session for validation
     app.storage.user['oauth_state'] = state
@@ -418,6 +422,7 @@ async def google_auth_callback():
                 email=user_info.email,
                 full_name=user_info.name,
                 avatar_url=user_info.picture,
+                refresh_token=user_info.refresh_token,  # For Drive API
             )
             
             # Store token in session

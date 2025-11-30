@@ -27,6 +27,10 @@ class Database(Base, TimestampMixin):
     # Status
     is_excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_modified: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    
+    # Google Drive integration
+    drive_document_id: Mapped[str | None] = mapped_column(String(100), nullable=True)  # Google Docs document ID
+    drive_last_upload: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Relationships
     team: Mapped["Team"] = relationship("Team", back_populates="databases")

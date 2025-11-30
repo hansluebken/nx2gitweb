@@ -515,6 +515,15 @@ def render_database_card(user, server, team, database, container):
                         icon='description',
                         on_click=lambda s=server, t=team, d=database: show_documentation_dialog(user, s, t, d)
                     ).props('flat dense color=purple')
+                    
+                    # Upload Drive button - only for OAuth users when Drive is enabled
+                    from ..services.drive_service import is_drive_enabled
+                    if user.auth_provider == 'google' and is_drive_enabled():
+                        ui.button(
+                            'Upload Drive',
+                            icon='cloud_upload',
+                            on_click=lambda s=server, t=team, d=database: show_upload_drive_dialog(user, s, t, d)
+                        ).props('flat dense color=teal')
 
                     # GitHub link to folder - get repo name from server
                     github_repo_name = get_repo_name_from_server(server)
@@ -1602,5 +1611,180 @@ def show_documentation_dialog(user, server, team, database):
         
         generate_btn.on_click(generate_documentation)
         save_btn.on_click(save_to_github)
+    
+    dialog.open()
+
+
+def show_upload_drive_dialog(user, server, team, database):
+    """Show dialog for uploading JSON to Google Drive as Google Doc"""
+    import logging
+    from datetime import datetime
+    from ..services.drive_service import (
+        GoogleDriveService, refresh_access_token, get_drive_config, DriveUploadResult
+    )
+    from ..utils.encryption import get_encryption_manager
+    from ..api.github_manager import GitHubManager
+    from ..utils.github_utils import sanitize_name, get_repo_name_from_server
+    import json
+    
+    logger = logging.getLogger(__name__)
+    
+    with ui.dialog() as dialog, ui.card().classes('w-full max-w-2xl'):
+        # Header
+        with ui.row().classes('w-full items-center justify-between p-4').style(
+            'background: linear-gradient(135deg, #009688 0%, #00796b 100%); margin: -16px -16px 0 -16px; width: calc(100% + 32px);'
+        ):
+            with ui.row().classes('items-center gap-2'):
+                ui.icon('cloud_upload', color='white', size='md')
+                ui.label(f'Upload Drive: {database.name}').classes('text-h6 text-white font-bold')
+            ui.button(icon='close', on_click=dialog.close).props('flat color=white')
+        
+        with ui.column().classes('w-full p-4 gap-4'):
+            # Check if user has refresh token
+            enc_manager = get_encryption_manager()
+            has_refresh_token = bool(user.google_refresh_token_encrypted)
+            
+            if not has_refresh_token:
+                with ui.card().classes('w-full p-4 bg-amber-50'):
+                    ui.label('Erneute Anmeldung erforderlich').classes('font-bold text-amber-800')
+                    ui.label(
+                        'Um Google Drive zu nutzen, müssen Sie sich einmal ab- und wieder anmelden. '
+                        'Dabei werden die erweiterten Berechtigungen für Google Drive angefordert.'
+                    ).classes('text-sm text-amber-700')
+                    ui.button(
+                        'Abmelden und neu anmelden',
+                        icon='logout',
+                        on_click=lambda: ui.navigate.to('/logout')
+                    ).props('color=amber')
+                return
+            
+            # Get Drive config
+            drive_config = get_drive_config()
+            if not drive_config or not drive_config.get('enabled'):
+                ui.label('Google Drive ist nicht aktiviert.').classes('text-negative')
+                return
+            
+            shared_folder = drive_config.get('shared_folder_name', 'ninox2git')
+            
+            # Info
+            ui.label('Die komplett.json Datei wird als Google Doc hochgeladen:').classes('text-subtitle1')
+            
+            with ui.card().classes('w-full p-3 bg-grey-1'):
+                path_display = f"{shared_folder}/{sanitize_name(server.name)}/{sanitize_name(team.name)}/{sanitize_name(database.name)}/komplett.json"
+                ui.label(path_display).classes('font-mono text-sm')
+            
+            # Show last upload if exists
+            if database.drive_document_id:
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('check_circle', color='positive')
+                    ui.label('Bereits hochgeladen').classes('text-positive')
+                    if database.drive_last_upload:
+                        ui.label(f'({database.drive_last_upload.strftime("%d.%m.%Y %H:%M")})').classes('text-grey-6 text-sm')
+                    ui.button(
+                        'Öffnen',
+                        icon='open_in_new',
+                        on_click=lambda: ui.navigate.to(
+                            f'https://docs.google.com/document/d/{database.drive_document_id}/edit',
+                            new_tab=True
+                        )
+                    ).props('flat dense')
+            
+            # Status area
+            status_container = ui.column().classes('w-full')
+            
+            # Upload button
+            async def do_upload():
+                with status_container:
+                    status_container.clear()
+                    
+                    with ui.row().classes('items-center gap-2'):
+                        ui.spinner(size='sm')
+                        status_label = ui.label('Lade JSON von GitHub...')
+                
+                try:
+                    # 1. Get JSON from GitHub
+                    github_token = enc_manager.decrypt(user.github_token_encrypted)
+                    github = GitHubManager(github_token, user.github_organization)
+                    repo_name = get_repo_name_from_server(server)
+                    repo = github.ensure_repository(repo_name)
+                    
+                    json_path = f"{database.github_path}/{sanitize_name(database.name)}-komplett.json"
+                    json_content = github.get_file_content(repo, json_path)
+                    
+                    if not json_content:
+                        raise ValueError(f"JSON-Datei nicht gefunden: {json_path}")
+                    
+                    json_data = json.loads(json_content)
+                    
+                    status_label.text = 'Erneuere Google Token...'
+                    
+                    # 2. Refresh access token
+                    refresh_token = enc_manager.decrypt(user.google_refresh_token_encrypted)
+                    access_token = await refresh_access_token(
+                        drive_config['client_id'],
+                        drive_config['client_secret'],
+                        refresh_token
+                    )
+                    
+                    if not access_token:
+                        raise ValueError("Konnte Google Token nicht erneuern. Bitte erneut anmelden.")
+                    
+                    status_label.text = 'Lade zu Google Drive hoch...'
+                    
+                    # 3. Upload to Drive
+                    drive_service = GoogleDriveService(access_token)
+                    result = await drive_service.upload_json_as_doc(
+                        shared_drive_name=shared_folder,
+                        server_name=server.name,
+                        team_name=team.name,
+                        database_name=database.name,
+                        json_content=json_data,
+                        existing_doc_id=database.drive_document_id
+                    )
+                    
+                    if not result.success:
+                        raise ValueError(result.error)
+                    
+                    # 4. Update database record
+                    db = get_db()
+                    try:
+                        db_record = db.query(Database).get(database.id)
+                        db_record.drive_document_id = result.document_id
+                        db_record.drive_last_upload = datetime.now()
+                        db.commit()
+                    finally:
+                        db.close()
+                    
+                    # Show success
+                    status_container.clear()
+                    with status_container:
+                        with ui.row().classes('items-center gap-2'):
+                            ui.icon('check_circle', color='positive', size='md')
+                            ui.label('Erfolgreich hochgeladen!').classes('text-positive font-bold')
+                        
+                        ui.button(
+                            'Dokument öffnen',
+                            icon='open_in_new',
+                            on_click=lambda: ui.navigate.to(result.document_url, new_tab=True)
+                        ).props('color=primary')
+                    
+                    ui.notify('Upload zu Google Drive erfolgreich!', type='positive')
+                    
+                except Exception as e:
+                    logger.error(f"Drive upload error: {e}")
+                    status_container.clear()
+                    with status_container:
+                        with ui.row().classes('items-center gap-2'):
+                            ui.icon('error', color='negative', size='md')
+                            ui.label(f'Fehler: {str(e)}').classes('text-negative')
+                    ui.notify(f'Upload fehlgeschlagen: {str(e)}', type='negative')
+            
+            with ui.row().classes('w-full justify-end gap-2 mt-4'):
+                ui.button('Abbrechen', on_click=dialog.close).props('flat')
+                ui.button(
+                    'Upload Drive' if not database.drive_document_id else 'Aktualisieren',
+                    icon='cloud_upload',
+                    on_click=do_upload
+                ).props('color=teal')
     
     dialog.open()

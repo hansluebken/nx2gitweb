@@ -29,6 +29,10 @@ class OAuthConfig(Base, TimestampMixin):
     
     # Optional: Redirect URI (usually auto-generated)
     redirect_uri: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    
+    # Google Drive integration
+    drive_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    drive_shared_folder_name: Mapped[str | None] = mapped_column(String(255), nullable=True)  # e.g. "ninox2git"
 
     def get_allowed_domains_list(self) -> list[str]:
         """Get allowed domains as a list"""

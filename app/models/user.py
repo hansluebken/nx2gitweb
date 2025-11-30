@@ -31,6 +31,7 @@ class User(Base, TimestampMixin):
     auth_provider: Mapped[str] = mapped_column(String(20), default='local', nullable=False)  # 'local' or 'google'
     google_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
     avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    google_refresh_token_encrypted: Mapped[str | None] = mapped_column(String(1000), nullable=True)  # For Drive API
 
     # Timestamps
     last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

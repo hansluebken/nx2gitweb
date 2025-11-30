@@ -868,6 +868,7 @@ def login_or_create_oauth_user(
     email: str,
     full_name: Optional[str] = None,
     avatar_url: Optional[str] = None,
+    refresh_token: Optional[str] = None,
     ip_address: Optional[str] = None,
     user_agent: Optional[str] = None
 ) -> tuple[UserDTO, str]:
@@ -884,6 +885,7 @@ def login_or_create_oauth_user(
         email: User's email from Google
         full_name: User's full name from Google
         avatar_url: User's avatar URL from Google
+        refresh_token: Google refresh token for Drive API (encrypted before storing)
         ip_address: Client IP address
         user_agent: Client user agent
         
@@ -975,6 +977,13 @@ def login_or_create_oauth_user(
         user.avatar_url = avatar_url
     if full_name and full_name != user.full_name:
         user.full_name = full_name
+    
+    # Store refresh token (encrypted) for Drive API access
+    if refresh_token:
+        from .utils.encryption import get_encryption_manager
+        enc_manager = get_encryption_manager()
+        user.google_refresh_token_encrypted = enc_manager.encrypt(refresh_token)
+        logger.info(f"Stored refresh token for user {user.username}")
     
     # Update last login
     user.last_login = datetime.utcnow()
