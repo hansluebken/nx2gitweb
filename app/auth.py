@@ -851,3 +851,186 @@ def activate_user(
     )
 
     return user
+
+
+# ============================================================================
+# OAuth Authentication Functions
+# ============================================================================
+
+class OAuthDomainNotAllowedError(AuthError):
+    """Raised when user's email domain is not allowed for OAuth"""
+    pass
+
+
+def login_or_create_oauth_user(
+    db: Session,
+    google_id: str,
+    email: str,
+    full_name: Optional[str] = None,
+    avatar_url: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None
+) -> tuple[UserDTO, str]:
+    """
+    Login or create a user via Google OAuth
+    
+    - If user with google_id exists: update and login
+    - If user with email exists: link Google account and login
+    - If auto_create enabled and domain allowed: create new user
+    
+    Args:
+        db: Database session
+        google_id: Google user ID
+        email: User's email from Google
+        full_name: User's full name from Google
+        avatar_url: User's avatar URL from Google
+        ip_address: Client IP address
+        user_agent: Client user agent
+        
+    Returns:
+        Tuple of (UserDTO, JWT token)
+        
+    Raises:
+        OAuthDomainNotAllowedError: If email domain is not allowed
+        InactiveUserError: If user account is inactive
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    from .models.oauth_config import OAuthConfig
+    
+    logger.info(f"OAuth login attempt for: {email}")
+    
+    # Get OAuth config
+    oauth_config = db.query(OAuthConfig).filter(
+        OAuthConfig.provider == 'google',
+        OAuthConfig.is_enabled == True
+    ).first()
+    
+    if not oauth_config:
+        raise AuthError("Google OAuth is not configured")
+    
+    # Check domain restriction
+    if not oauth_config.is_domain_allowed(email):
+        allowed = oauth_config.get_allowed_domains_list()
+        logger.warning(f"OAuth domain not allowed for {email}. Allowed: {allowed}")
+        raise OAuthDomainNotAllowedError(
+            f"Die Domain Ihrer E-Mail-Adresse ist nicht erlaubt. "
+            f"Erlaubte Domains: {', '.join(allowed)}"
+        )
+    
+    # Try to find existing user by google_id
+    user = db.query(User).filter(User.google_id == google_id).first()
+    
+    if user:
+        logger.info(f"Found existing user by google_id: {user.username}")
+    else:
+        # Try to find by email (link existing account)
+        user = db.query(User).filter(User.email == email).first()
+        
+        if user:
+            logger.info(f"Linking Google account to existing user: {user.username}")
+            user.google_id = google_id
+            user.auth_provider = 'google'
+        elif oauth_config.auto_create_users:
+            # Create new user
+            logger.info(f"Creating new user via OAuth: {email}")
+            
+            # Generate username from email
+            username = email.split('@')[0]
+            base_username = username
+            counter = 1
+            
+            # Ensure unique username
+            while db.query(User).filter(User.username == username).first():
+                username = f"{base_username}{counter}"
+                counter += 1
+            
+            user = User(
+                username=username,
+                email=email,
+                password_hash="",  # No password for OAuth users
+                full_name=full_name,
+                is_admin=False,
+                is_active=True,
+                auth_provider='google',
+                google_id=google_id,
+                avatar_url=avatar_url,
+            )
+            db.add(user)
+            logger.info(f"Created new OAuth user: {username}")
+        else:
+            logger.warning(f"Auto-create disabled, user not found: {email}")
+            raise UserNotFoundError(
+                "Kein Benutzer mit dieser E-Mail-Adresse gefunden. "
+                "Automatische Registrierung ist deaktiviert."
+            )
+    
+    # Check if user is active
+    if not user.is_active:
+        raise InactiveUserError("Ihr Benutzerkonto ist deaktiviert")
+    
+    # Update user info from Google
+    if avatar_url and avatar_url != user.avatar_url:
+        user.avatar_url = avatar_url
+    if full_name and full_name != user.full_name:
+        user.full_name = full_name
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    
+    # Capture user data before commit
+    user_id = user.id if user.id else None
+    username = user.username
+    user_email = user.email
+    user_full_name = user.full_name
+    user_is_admin = user.is_admin
+    user_is_active = user.is_active
+    user_last_login = user.last_login
+    user_github_token = user.github_token_encrypted
+    user_github_org = user.github_organization
+    user_github_repo = user.github_default_repo
+    user_auth_provider = user.auth_provider
+    user_google_id = user.google_id
+    user_avatar_url = user.avatar_url
+    
+    # Commit changes
+    db.commit()
+    
+    # Get user_id after commit for new users
+    if not user_id:
+        user_id = user.id
+    
+    # Create audit log
+    create_audit_log(
+        db=db,
+        user_id=user_id,
+        action='oauth_login',
+        details=f"User {username} logged in via Google OAuth",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        auto_commit=True
+    )
+    
+    # Create UserDTO
+    user_dto = UserDTO(
+        id=user_id,
+        username=username,
+        email=user_email,
+        full_name=user_full_name,
+        is_admin=user_is_admin,
+        is_active=user_is_active,
+        last_login=user_last_login,
+        github_token_encrypted=user_github_token,
+        github_organization=user_github_org,
+        github_default_repo=user_github_repo,
+        auth_provider=user_auth_provider,
+        google_id=user_google_id,
+        avatar_url=user_avatar_url,
+    )
+    
+    # Generate JWT token
+    token = generate_jwt_token(user_dto)
+    
+    logger.info(f"OAuth login successful for: {username}")
+    return user_dto, token

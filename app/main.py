@@ -322,6 +322,131 @@ def changes_page():
     changes.render(user)
 
 
+# ============================================================================
+# OAuth Routes
+# ============================================================================
+
+@ui.page('/auth/google')
+async def google_auth_start():
+    """Start Google OAuth flow - redirects to Google"""
+    from .services.oauth_service import get_oauth_service
+    
+    oauth_service = get_oauth_service()
+    if not oauth_service:
+        ui.notify('Google OAuth ist nicht konfiguriert', type='negative')
+        ui.navigate.to('/login')
+        return
+    
+    # Generate auth URL and redirect
+    auth_url, state = oauth_service.generate_auth_url()
+    
+    # Store state in session for validation
+    app.storage.user['oauth_state'] = state
+    
+    # Redirect to Google
+    await ui.run_javascript(f'window.location.href = "{auth_url}"')
+
+
+@ui.page('/auth/google/callback')
+async def google_auth_callback():
+    """Handle Google OAuth callback"""
+    from .services.oauth_service import get_oauth_service, OAuthError
+    from .auth import login_or_create_oauth_user, OAuthDomainNotAllowedError, InactiveUserError
+    from nicegui import app as nicegui_app
+    
+    # Get query parameters
+    code = nicegui_app.storage.browser.get('code')
+    state = nicegui_app.storage.browser.get('state')
+    error = nicegui_app.storage.browser.get('error')
+    
+    # Check for errors from Google
+    if error:
+        logger.error(f"OAuth error from Google: {error}")
+        ui.notify(f'Google Anmeldung fehlgeschlagen: {error}', type='negative')
+        ui.navigate.to('/login')
+        return
+    
+    # Get code and state from URL using JavaScript
+    code_result = await ui.run_javascript('''
+        const params = new URLSearchParams(window.location.search);
+        return {code: params.get('code'), state: params.get('state'), error: params.get('error')};
+    ''')
+    
+    code = code_result.get('code') if code_result else None
+    state = code_result.get('state') if code_result else None
+    error = code_result.get('error') if code_result else None
+    
+    if error:
+        logger.error(f"OAuth error from Google: {error}")
+        ui.notify(f'Google Anmeldung fehlgeschlagen: {error}', type='negative')
+        ui.navigate.to('/login')
+        return
+    
+    if not code:
+        logger.error("No authorization code in callback")
+        ui.notify('Keine Autorisierung erhalten', type='negative')
+        ui.navigate.to('/login')
+        return
+    
+    # Validate state
+    oauth_service = get_oauth_service()
+    if not oauth_service:
+        ui.notify('Google OAuth ist nicht konfiguriert', type='negative')
+        ui.navigate.to('/login')
+        return
+    
+    stored_state = app.storage.user.get('oauth_state')
+    if state and stored_state and state != stored_state:
+        logger.error("OAuth state mismatch")
+        ui.notify('Sicherheitsfehler: State mismatch', type='negative')
+        ui.navigate.to('/login')
+        return
+    
+    # Clear stored state
+    app.storage.user.pop('oauth_state', None)
+    
+    try:
+        # Exchange code for user info
+        user_info = await oauth_service.authenticate(code)
+        
+        # Login or create user
+        db = get_db()
+        try:
+            user_dto, token = login_or_create_oauth_user(
+                db=db,
+                google_id=user_info.google_id,
+                email=user_info.email,
+                full_name=user_info.name,
+                avatar_url=user_info.picture,
+            )
+            
+            # Store token in session
+            app.storage.user[SESSION_TOKEN_KEY] = token
+            
+            ui.notify(f'Willkommen, {user_dto.full_name or user_dto.username}!', type='positive')
+            ui.navigate.to('/dashboard')
+            
+        finally:
+            db.close()
+            
+    except OAuthDomainNotAllowedError as e:
+        logger.warning(f"OAuth domain not allowed: {e}")
+        ui.notify(str(e), type='negative')
+        ui.navigate.to('/login')
+    except InactiveUserError as e:
+        logger.warning(f"OAuth inactive user: {e}")
+        ui.notify(str(e), type='negative')
+        ui.navigate.to('/login')
+    except OAuthError as e:
+        logger.error(f"OAuth error: {e}")
+        ui.notify(f'Anmeldung fehlgeschlagen: {str(e)}', type='negative')
+        ui.navigate.to('/login')
+    except Exception as e:
+        logger.error(f"Unexpected OAuth error: {e}")
+        ui.notify('Ein unerwarteter Fehler ist aufgetreten', type='negative')
+        ui.navigate.to('/login')
+
+
 @ui.page('/logout')
 def logout_page():
     """Logout and redirect to login"""

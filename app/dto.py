@@ -22,6 +22,10 @@ class UserDTO:
     github_token_encrypted: Optional[str] = None
     github_organization: Optional[str] = None
     github_default_repo: Optional[str] = None
+    # OAuth fields
+    auth_provider: str = 'local'
+    google_id: Optional[str] = None
+    avatar_url: Optional[str] = None
 
     @classmethod
     def from_model(cls, user):
@@ -67,6 +71,11 @@ class UserDTO:
             logger.info("UserDTO.from_model: Loading github_default_repo...")
             github_default_repo = user.github_default_repo
 
+            logger.info("UserDTO.from_model: Loading OAuth fields...")
+            auth_provider = getattr(user, 'auth_provider', 'local') or 'local'
+            google_id = getattr(user, 'google_id', None)
+            avatar_url = getattr(user, 'avatar_url', None)
+
             logger.info("UserDTO.from_model: Creating DTO object...")
             # Now safely copy the values
             return cls(
@@ -79,7 +88,10 @@ class UserDTO:
                 last_login=last_login,
                 github_token_encrypted=github_token_encrypted,
                 github_organization=github_organization,
-                github_default_repo=github_default_repo
+                github_default_repo=github_default_repo,
+                auth_provider=auth_provider,
+                google_id=google_id,
+                avatar_url=avatar_url
             )
         except Exception as e:
             logger.error(f"UserDTO.from_model ERROR: {type(e).__name__}: {e}")

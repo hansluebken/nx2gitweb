@@ -11,6 +11,7 @@ from .user_preference import UserPreference
 from .ai_config import AIConfig, AIProvider, AVAILABLE_MODELS, DEFAULT_MODELS
 from .changelog import ChangeLog
 from .documentation import Documentation
+from .oauth_config import OAuthConfig
 
 __all__ = [
     'Base',
@@ -31,4 +32,5 @@ __all__ = [
     'DEFAULT_MODELS',
     'ChangeLog',
     'Documentation',
+    'OAuthConfig',
 ]

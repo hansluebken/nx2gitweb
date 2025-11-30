@@ -42,6 +42,7 @@ def render(user):
         with ui.tabs().classes('w-full') as tabs:
             overview_tab = ui.tab('Overview', icon='dashboard')
             users_tab = ui.tab('Users', icon='people')
+            oauth_tab = ui.tab('OAuth', icon='login')
             ai_tab = ui.tab('KI-Konfiguration', icon='psychology')
             smtp_tab = ui.tab('SMTP Config', icon='email')
             audit_tab = ui.tab('Audit Logs', icon='receipt_long')
@@ -55,6 +56,10 @@ def render(user):
             # Users panel
             with ui.tab_panel(users_tab):
                 render_users_management(user)
+
+            # OAuth Configuration panel
+            with ui.tab_panel(oauth_tab):
+                render_oauth_config(user)
 
             # AI Configuration panel
             with ui.tab_panel(ai_tab):
@@ -71,6 +76,154 @@ def render(user):
             # Statistics panel
             with ui.tab_panel(stats_tab):
                 render_statistics(user)
+
+
+def render_oauth_config(user):
+    """Render OAuth configuration panel"""
+    from ..models.oauth_config import OAuthConfig
+    
+    encryption = get_encryption_manager()
+    
+    with ui.column().classes('w-full gap-4'):
+        ui.label('OAuth Konfiguration').classes('text-h5 font-bold')
+        ui.label(
+            'Konfigurieren Sie Google Workspace OAuth für Single Sign-On. '
+            'Benutzer können sich dann mit ihrem Google-Konto anmelden.'
+        ).classes('text-grey-7 mb-4')
+        
+        # Instructions card
+        with ui.card().classes('w-full p-4 bg-blue-50'):
+            ui.label('Einrichtung in Google Cloud Console:').classes('font-bold mb-2')
+            with ui.column().classes('gap-1 text-sm'):
+                ui.label('1. Gehen Sie zu console.cloud.google.com')
+                ui.label('2. Erstellen Sie ein neues Projekt oder wählen Sie ein bestehendes')
+                ui.label('3. Aktivieren Sie "Google+ API" unter APIs & Services')
+                ui.label('4. Erstellen Sie OAuth 2.0 Credentials unter "Credentials"')
+                ui.label('5. Fügen Sie die Redirect URI hinzu (siehe unten)')
+        
+        # Config form
+        config_container = ui.column().classes('w-full gap-4 mt-4')
+        
+        def load_config():
+            """Load OAuth config"""
+            config_container.clear()
+            
+            db = get_db()
+            try:
+                config = db.query(OAuthConfig).filter(OAuthConfig.provider == 'google').first()
+                
+                if not config:
+                    # Create default config
+                    config = OAuthConfig(
+                        provider='google',
+                        is_enabled=False,
+                        auto_create_users=True,
+                    )
+                    db.add(config)
+                    db.commit()
+                
+                # Decrypt client secret if exists
+                client_secret_decrypted = ''
+                if config.client_secret_encrypted:
+                    try:
+                        client_secret_decrypted = encryption.decrypt(config.client_secret_encrypted) or ''
+                    except:
+                        pass
+                
+                with config_container:
+                    with ui.card().classes('w-full p-4'):
+                        ui.label('Google OAuth').classes('text-h6 font-bold mb-4')
+                        
+                        # Enabled toggle
+                        enabled_switch = ui.switch(
+                            'OAuth aktiviert',
+                            value=config.is_enabled
+                        ).classes('mb-4')
+                        
+                        # Client ID
+                        client_id_input = ui.input(
+                            label='Client ID',
+                            value=config.client_id or '',
+                            placeholder='xxx.apps.googleusercontent.com'
+                        ).classes('w-full mb-2')
+                        
+                        # Client Secret
+                        client_secret_input = ui.input(
+                            label='Client Secret',
+                            value=client_secret_decrypted,
+                            password=True,
+                            password_toggle_button=True,
+                            placeholder='Client Secret von Google'
+                        ).classes('w-full mb-2')
+                        
+                        # Redirect URI (read-only)
+                        import os
+                        app_url = os.getenv('APP_URL', 'http://localhost:8765')
+                        redirect_uri = f"{app_url}/auth/google/callback"
+                        
+                        ui.input(
+                            label='Redirect URI (in Google Console eintragen)',
+                            value=redirect_uri,
+                        ).classes('w-full mb-2').props('readonly')
+                        
+                        # Allowed domains
+                        allowed_domains_input = ui.input(
+                            label='Erlaubte Domains (kommagetrennt, leer = alle erlaubt)',
+                            value=config.allowed_domains or '',
+                            placeholder='beispiel.de, firma.com'
+                        ).classes('w-full mb-2')
+                        
+                        # Auto-create users
+                        auto_create_switch = ui.switch(
+                            'Neue Benutzer automatisch anlegen',
+                            value=config.auto_create_users
+                        ).classes('mb-4')
+                        
+                        ui.label(
+                            'Wenn aktiviert, werden neue Benutzer automatisch angelegt, '
+                            'wenn sie sich zum ersten Mal mit Google anmelden und ihre Domain erlaubt ist.'
+                        ).classes('text-sm text-grey-6 mb-4')
+                        
+                        # Save button
+                        async def save_config():
+                            db = get_db()
+                            try:
+                                config = db.query(OAuthConfig).filter(OAuthConfig.provider == 'google').first()
+                                
+                                config.is_enabled = enabled_switch.value
+                                config.client_id = client_id_input.value.strip() or None
+                                
+                                # Encrypt client secret if changed
+                                new_secret = client_secret_input.value.strip()
+                                if new_secret:
+                                    config.client_secret_encrypted = encryption.encrypt(new_secret)
+                                elif not client_secret_input.value:
+                                    config.client_secret_encrypted = None
+                                
+                                config.allowed_domains = allowed_domains_input.value.strip() or None
+                                config.auto_create_users = auto_create_switch.value
+                                config.redirect_uri = redirect_uri
+                                
+                                db.commit()
+                                
+                                Toast.success('OAuth Konfiguration gespeichert!')
+                                
+                            except Exception as e:
+                                Toast.error(f'Fehler beim Speichern: {str(e)}')
+                            finally:
+                                db.close()
+                        
+                        ui.button(
+                            'Speichern',
+                            on_click=save_config,
+                            color='primary',
+                            icon='save'
+                        )
+                
+            finally:
+                db.close()
+        
+        load_config()
 
 
 def render_ai_config(user):

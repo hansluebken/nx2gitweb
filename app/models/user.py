@@ -27,6 +27,11 @@ class User(Base, TimestampMixin):
     github_organization: Mapped[str | None] = mapped_column(String(100), nullable=True)
     github_default_repo: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
+    # OAuth fields
+    auth_provider: Mapped[str] = mapped_column(String(20), default='local', nullable=False)  # 'local' or 'google'
+    google_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     # Timestamps
     last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

@@ -53,8 +53,28 @@ def render():
 
 def render_login_form():
     """Render login form"""
+    from ..services.oauth_service import is_oauth_enabled
+    
     with ui.column().classes('w-full gap-4'):
         ui.label('Sign In').classes('text-h5 font-bold mb-2')
+        
+        # Google OAuth button (if enabled)
+        if is_oauth_enabled():
+            with ui.row().classes('w-full justify-center mb-4'):
+                ui.button(
+                    'Mit Google anmelden',
+                    icon='img:https://www.google.com/favicon.ico',
+                    on_click=lambda: ui.navigate.to('/auth/google'),
+                    color='white'
+                ).classes('w-full').props('outline size=lg').style(
+                    'border: 1px solid #dadce0; color: #3c4043;'
+                )
+            
+            # Divider
+            with ui.row().classes('w-full items-center gap-4 my-2'):
+                ui.element('div').classes('flex-grow').style('border-top: 1px solid #e0e0e0;')
+                ui.label('oder').classes('text-grey-6 text-sm')
+                ui.element('div').classes('flex-grow').style('border-top: 1px solid #e0e0e0;')
 
         username_input = FormField.text(
             label='Username or Email',
