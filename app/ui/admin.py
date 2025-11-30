@@ -91,15 +91,144 @@ def render_oauth_config(user):
             'Benutzer können sich dann mit ihrem Google-Konto anmelden.'
         ).classes('text-grey-7 mb-4')
         
-        # Instructions card
-        with ui.card().classes('w-full p-4 bg-blue-50'):
-            ui.label('Einrichtung in Google Cloud Console:').classes('font-bold mb-2')
-            with ui.column().classes('gap-1 text-sm'):
-                ui.label('1. Gehen Sie zu console.cloud.google.com')
-                ui.label('2. Erstellen Sie ein neues Projekt oder wählen Sie ein bestehendes')
-                ui.label('3. Aktivieren Sie "Google+ API" unter APIs & Services')
-                ui.label('4. Erstellen Sie OAuth 2.0 Credentials unter "Credentials"')
-                ui.label('5. Fügen Sie die Redirect URI hinzu (siehe unten)')
+        # Instructions - expandable documentation
+        with ui.expansion('Schritt-für-Schritt Anleitung: Google Cloud Console einrichten', icon='help_outline').classes('w-full bg-blue-50'):
+            with ui.column().classes('gap-4 p-4'):
+                
+                # Step 1: Project
+                with ui.card().classes('w-full p-3 bg-white'):
+                    ui.label('Schritt 1: Google Cloud Projekt erstellen').classes('font-bold text-primary')
+                    with ui.column().classes('gap-1 text-sm mt-2'):
+                        ui.label('1. Öffnen Sie https://console.cloud.google.com')
+                        ui.label('2. Klicken Sie oben links auf das Projekt-Dropdown (neben "Google Cloud")')
+                        ui.label('3. Klicken Sie auf "NEUES PROJEKT"')
+                        ui.label('4. Projektname eingeben, z.B. "Ninox2Git"')
+                        ui.label('5. Organisation auswählen (falls vorhanden)')
+                        ui.label('6. Klicken Sie auf "ERSTELLEN"')
+                        ui.label('7. Warten Sie bis das Projekt erstellt ist und wählen Sie es aus')
+                
+                # Step 2: APIs
+                with ui.card().classes('w-full p-3 bg-white'):
+                    ui.label('Schritt 2: APIs aktivieren').classes('font-bold text-primary')
+                    with ui.column().classes('gap-1 text-sm mt-2'):
+                        ui.label('1. Im linken Menü: "APIs und Dienste" → "Bibliothek"')
+                        ui.label('2. Suchen Sie nach "Google Drive API" und klicken Sie darauf')
+                        ui.label('3. Klicken Sie auf "AKTIVIEREN"')
+                        ui.label('4. Gehen Sie zurück zur Bibliothek (Pfeil links oben)')
+                        ui.label('5. Suchen Sie nach "Google Docs API" und klicken Sie darauf')
+                        ui.label('6. Klicken Sie auf "AKTIVIEREN"')
+                    with ui.card().classes('w-full p-2 bg-amber-50 mt-2'):
+                        ui.label('Hinweis: Beide APIs werden für die Drive-Upload-Funktion benötigt.').classes('text-xs text-amber-800')
+                
+                # Step 3: OAuth Consent Screen
+                with ui.card().classes('w-full p-3 bg-white'):
+                    ui.label('Schritt 3: OAuth-Zustimmungsbildschirm konfigurieren').classes('font-bold text-primary')
+                    with ui.column().classes('gap-1 text-sm mt-2'):
+                        ui.label('1. Im linken Menü: "APIs und Dienste" → "OAuth-Zustimmungsbildschirm"')
+                        ui.label('2. User Type auswählen:')
+                        with ui.column().classes('ml-4 gap-1'):
+                            ui.label('• "Intern" - Nur für Benutzer Ihrer Google Workspace Organisation')
+                            ui.label('• "Extern" - Für alle Google-Konten (erfordert Verifizierung)')
+                        ui.label('3. Klicken Sie auf "ERSTELLEN"')
+                        ui.label('4. App-Informationen ausfüllen:')
+                        with ui.column().classes('ml-4 gap-1'):
+                            ui.label('• App-Name: "Ninox2Git" (oder Ihr gewünschter Name)')
+                            ui.label('• User-Support-E-Mail: Ihre E-Mail-Adresse')
+                            ui.label('• App-Logo: Optional')
+                        ui.label('5. App-Domain: Leer lassen oder Ihre Domain eintragen')
+                        ui.label('6. Entwicklerkontakt: Ihre E-Mail-Adresse')
+                        ui.label('7. Klicken Sie auf "SPEICHERN UND FORTFAHREN"')
+                
+                # Step 4: Scopes
+                with ui.card().classes('w-full p-3 bg-white'):
+                    ui.label('Schritt 4: Bereiche (Scopes) hinzufügen').classes('font-bold text-primary')
+                    with ui.column().classes('gap-1 text-sm mt-2'):
+                        ui.label('1. Klicken Sie auf "BEREICHE HINZUFÜGEN ODER ENTFERNEN"')
+                        ui.label('2. Suchen und aktivieren Sie folgende Bereiche:')
+                        with ui.card().classes('w-full p-2 bg-grey-1 mt-1 mb-1'):
+                            ui.label('.../auth/userinfo.email').classes('font-mono text-xs')
+                            ui.label('.../auth/userinfo.profile').classes('font-mono text-xs')
+                            ui.label('openid').classes('font-mono text-xs')
+                        ui.label('3. Für Google Drive zusätzlich:')
+                        with ui.card().classes('w-full p-2 bg-grey-1 mt-1 mb-1'):
+                            ui.label('.../auth/drive.file').classes('font-mono text-xs')
+                            ui.label('.../auth/documents').classes('font-mono text-xs')
+                        ui.label('4. Klicken Sie auf "AKTUALISIEREN"')
+                        ui.label('5. Klicken Sie auf "SPEICHERN UND FORTFAHREN"')
+                
+                # Step 5: Test Users (if External)
+                with ui.card().classes('w-full p-3 bg-white'):
+                    ui.label('Schritt 5: Testbenutzer (nur bei "Extern")').classes('font-bold text-primary')
+                    with ui.column().classes('gap-1 text-sm mt-2'):
+                        ui.label('1. Wenn Sie "Extern" gewählt haben:')
+                        ui.label('2. Klicken Sie auf "+ ADD USERS"')
+                        ui.label('3. Fügen Sie E-Mail-Adressen der Testbenutzer hinzu')
+                        ui.label('4. Klicken Sie auf "SPEICHERN UND FORTFAHREN"')
+                    with ui.card().classes('w-full p-2 bg-amber-50 mt-2'):
+                        ui.label('Hinweis: Bei "Intern" ist dieser Schritt nicht erforderlich.').classes('text-xs text-amber-800')
+                
+                # Step 6: Create Credentials
+                with ui.card().classes('w-full p-3 bg-white'):
+                    ui.label('Schritt 6: OAuth 2.0 Client-ID erstellen').classes('font-bold text-primary')
+                    with ui.column().classes('gap-1 text-sm mt-2'):
+                        ui.label('1. Im linken Menü: "APIs und Dienste" → "Anmeldedaten"')
+                        ui.label('2. Klicken Sie oben auf "+ ANMELDEDATEN ERSTELLEN"')
+                        ui.label('3. Wählen Sie "OAuth-Client-ID"')
+                        ui.label('4. Anwendungstyp: "Webanwendung"')
+                        ui.label('5. Name: "Ninox2Git Web Client" (oder beliebig)')
+                        ui.label('6. Autorisierte JavaScript-Quellen: Leer lassen')
+                        ui.label('7. Autorisierte Weiterleitungs-URIs:')
+                        
+                        # Show the redirect URI
+                        import os
+                        app_url = os.getenv('APP_URL', 'http://localhost:8765')
+                        redirect_uri = f"{app_url}/auth/google/callback"
+                        
+                        with ui.card().classes('w-full p-2 bg-green-50 mt-1 mb-1'):
+                            ui.label('Kopieren Sie diese URI:').classes('text-xs text-green-800')
+                            with ui.row().classes('items-center gap-2'):
+                                uri_label = ui.label(redirect_uri).classes('font-mono text-sm font-bold')
+                                ui.button(
+                                    icon='content_copy',
+                                    on_click=lambda: ui.run_javascript(f'navigator.clipboard.writeText("{redirect_uri}"); ')
+                                ).props('flat dense size=sm').tooltip('In Zwischenablage kopieren')
+                        
+                        ui.label('8. Klicken Sie auf "ERSTELLEN"')
+                        ui.label('9. Ein Popup erscheint mit Ihren Anmeldedaten:')
+                        with ui.column().classes('ml-4 gap-1'):
+                            ui.label('• Client-ID: Kopieren Sie diese (endet mit .apps.googleusercontent.com)')
+                            ui.label('• Clientschlüssel: Kopieren Sie diesen')
+                        ui.label('10. Fügen Sie beide Werte unten in die Konfiguration ein')
+                
+                # Step 7: Google Drive Setup
+                with ui.card().classes('w-full p-3 bg-white'):
+                    ui.label('Schritt 7: Google Drive Shared Drive erstellen (optional)').classes('font-bold text-primary')
+                    with ui.column().classes('gap-1 text-sm mt-2'):
+                        ui.label('Für die "Upload Drive" Funktion:')
+                        ui.label('1. Öffnen Sie https://drive.google.com')
+                        ui.label('2. Im linken Menü: "Geteilte Ablagen"')
+                        ui.label('3. Klicken Sie auf "+ Neu" → "Neue geteilte Ablage"')
+                        ui.label('4. Name eingeben: "ninox2git" (oder Ihr gewünschter Name)')
+                        ui.label('5. Klicken Sie auf "Erstellen"')
+                        ui.label('6. Rechtsklick auf die Ablage → "Mitglieder verwalten"')
+                        ui.label('7. Fügen Sie alle Benutzer hinzu, die hochladen sollen (als "Mitbearbeiter")')
+                        ui.label('8. Fügen Sie Benutzer, die nur lesen sollen (als "Betrachter") hinzu')
+                    with ui.card().classes('w-full p-2 bg-blue-50 mt-2'):
+                        ui.label('Der Name der Shared Drive muss unten bei "Shared Drive Name" eingetragen werden.').classes('text-xs text-blue-800')
+                
+                # Troubleshooting
+                with ui.card().classes('w-full p-3 bg-red-50'):
+                    ui.label('Fehlerbehebung').classes('font-bold text-red-800')
+                    with ui.column().classes('gap-2 text-sm mt-2'):
+                        with ui.row().classes('gap-2'):
+                            ui.label('•').classes('text-red-800')
+                            ui.label('"Error 400: redirect_uri_mismatch" → Die Redirect URI stimmt nicht überein. Prüfen Sie die URI in den Google-Anmeldedaten.')
+                        with ui.row().classes('gap-2'):
+                            ui.label('•').classes('text-red-800')
+                            ui.label('"Error 403: access_denied" → Der Benutzer ist nicht als Testbenutzer hinzugefügt (bei "Extern") oder die Domain ist nicht erlaubt.')
+                        with ui.row().classes('gap-2'):
+                            ui.label('•').classes('text-red-800')
+                            ui.label('"Shared Drive nicht gefunden" → Prüfen Sie den Namen und ob der Benutzer Zugriff auf die Shared Drive hat.')
         
         # Config form
         config_container = ui.column().classes('w-full gap-4 mt-4')
