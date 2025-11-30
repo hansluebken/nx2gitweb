@@ -99,14 +99,14 @@ class NavHeader:
         # Check if any sub-item is active
         is_active = self.current_page in active_pages
         
-        # Create button with dropdown
+        # Create button with dropdown - no color prop, use classes for styling
         if icon_only:
-            btn = ui.button(icon=icon, color='white').props('flat')
+            btn = ui.button(icon=icon).props('flat')
         else:
-            btn = ui.button(label, icon=icon, color='white').props('flat')
+            btn = ui.button(label, icon=icon).props('flat')
         
         if is_active:
-            btn.classes('bg-white bg-opacity-20')
+            btn.classes('text-white bg-white bg-opacity-20')
         else:
             btn.classes('text-white')
         
