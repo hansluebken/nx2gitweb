@@ -10,6 +10,7 @@ from .smtp_config import SmtpConfig
 from .user_preference import UserPreference
 from .ai_config import AIConfig, AIProvider, AVAILABLE_MODELS, DEFAULT_MODELS
 from .changelog import ChangeLog
+from .documentation import Documentation
 
 __all__ = [
     'Base',
@@ -29,4 +30,5 @@ __all__ = [
     'AVAILABLE_MODELS',
     'DEFAULT_MODELS',
     'ChangeLog',
+    'Documentation',
 ]

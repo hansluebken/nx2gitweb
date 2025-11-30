@@ -1,0 +1,251 @@
+"""
+Documentation Generator Service
+Generates application documentation from Ninox database structure using Gemini AI
+"""
+import json
+import logging
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+# System prompt for documentation generation
+DOCUMENTATION_PROMPT = """Du bist ein Experte für Ninox-Datenbanken und technische Dokumentation.
+
+Analysiere die folgende Ninox-Datenbankstruktur und erstelle eine ausführliche, 
+gut strukturierte Dokumentation auf Deutsch im Markdown-Format.
+
+Die Dokumentation soll folgende Abschnitte enthalten:
+
+## 1. Übersicht
+- Name und Zweck der Anwendung (aus der Struktur ableiten)
+- Kurze Zusammenfassung der Hauptfunktionen
+
+## 2. Datenmodell
+Für jede Tabelle:
+- Tabellenname und Beschreibung
+- Alle Felder mit Typ und Bedeutung
+- Besondere Felder (Formeln, Berechnungen)
+
+## 3. Beziehungen
+- Übersicht aller Tabellenbeziehungen
+- Textuelle Darstellung der Verknüpfungen (z.B. "Kunde 1:n Aufträge")
+- Mermaid-Diagramm des Datenmodells (falls sinnvoll)
+
+## 4. Geschäftslogik
+- Wichtige Formeln und deren Bedeutung
+- Berechnete Felder
+- Trigger und Automationen (falls vorhanden)
+
+## 5. Benutzeroberfläche
+- Views und deren Zweck
+- Reports (falls vorhanden)
+- Print-Layouts (falls vorhanden)
+
+## 6. Technische Zusammenfassung
+- Anzahl Tabellen
+- Anzahl Felder gesamt
+- Komplexitätsbewertung (einfach/mittel/komplex)
+- Besondere Merkmale der Anwendung
+
+Wichtige Hinweise:
+- Schreibe auf Deutsch
+- Verwende klare, verständliche Sprache
+- Strukturiere mit Markdown-Überschriften
+- Verwende Tabellen für Feldübersichten
+- Füge Mermaid-Diagramme ein wo sinnvoll
+
+JSON-Struktur der Datenbank:
+"""
+
+
+@dataclass
+class DocumentationResult:
+    """Result of documentation generation"""
+    content: str  # Generated Markdown content
+    success: bool = True
+    error: Optional[str] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    model: str = ""
+    generated_at: Optional[datetime] = None
+
+
+class DocumentationGenerator:
+    """Generates application documentation from Ninox database structure"""
+    
+    # Use the latest Gemini model
+    MODEL = "gemini-2.5-pro"
+    
+    def __init__(self, api_key: str):
+        """
+        Initialize the documentation generator
+        
+        Args:
+            api_key: Google Gemini API key
+        """
+        self.api_key = api_key
+    
+    def generate(self, structure_json: Dict[str, Any], db_name: str) -> DocumentationResult:
+        """
+        Generate documentation from Ninox database structure
+        
+        Args:
+            structure_json: The database structure as dict
+            db_name: Name of the database
+            
+        Returns:
+            DocumentationResult with generated markdown
+        """
+        try:
+            import google.generativeai as genai
+            
+            # Configure Gemini
+            genai.configure(api_key=self.api_key)
+            model = genai.GenerativeModel(self.MODEL)
+            
+            # Prepare the structure JSON
+            structure_str = json.dumps(structure_json, indent=2, ensure_ascii=False)
+            
+            # Build the full prompt
+            full_prompt = f"{DOCUMENTATION_PROMPT}\n\n```json\n{structure_str}\n```"
+            
+            logger.info(f"Generating documentation for '{db_name}' using {self.MODEL}")
+            
+            # Generate content
+            response = model.generate_content(
+                full_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    max_output_tokens=8000,  # Allow long documentation
+                    temperature=0.3,  # More focused output
+                )
+            )
+            
+            # Extract token usage
+            input_tokens = None
+            output_tokens = None
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                input_tokens = response.usage_metadata.prompt_token_count
+                output_tokens = response.usage_metadata.candidates_token_count
+            
+            # Get the generated text
+            content = response.text
+            
+            # Add header with metadata
+            header = f"""# {db_name} - Anwendungsdokumentation
+
+> **Automatisch generiert am:** {datetime.now().strftime('%d.%m.%Y um %H:%M Uhr')}  
+> **KI-Modell:** {self.MODEL}  
+> **Token-Verbrauch:** {input_tokens or '?'} Input / {output_tokens or '?'} Output
+
+---
+
+"""
+            content = header + content
+            
+            logger.info(f"Documentation generated successfully: {input_tokens} input, {output_tokens} output tokens")
+            
+            return DocumentationResult(
+                content=content,
+                success=True,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                model=self.MODEL,
+                generated_at=datetime.now()
+            )
+            
+        except Exception as e:
+            logger.error(f"Error generating documentation: {str(e)}")
+            return DocumentationResult(
+                content="",
+                success=False,
+                error=str(e),
+                model=self.MODEL
+            )
+    
+    @staticmethod
+    def extract_structure_summary(structure_json: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract a summary of the structure for preview
+        
+        Args:
+            structure_json: The database structure
+            
+        Returns:
+            Dict with summary information
+        """
+        summary = {
+            "tables": [],
+            "total_fields": 0,
+            "has_views": False,
+            "has_reports": False,
+        }
+        
+        try:
+            # Handle different JSON structures
+            types = structure_json.get("types", [])
+            
+            for table in types:
+                table_name = table.get("caption", table.get("name", "Unknown"))
+                fields = table.get("fields", [])
+                field_count = len(fields)
+                
+                summary["tables"].append({
+                    "name": table_name,
+                    "field_count": field_count
+                })
+                summary["total_fields"] += field_count
+                
+                # Check for views
+                if table.get("views"):
+                    summary["has_views"] = True
+                    
+                # Check for reports
+                if table.get("reports"):
+                    summary["has_reports"] = True
+                    
+        except Exception as e:
+            logger.warning(f"Error extracting structure summary: {e}")
+        
+        return summary
+
+
+def get_documentation_generator() -> Optional[DocumentationGenerator]:
+    """
+    Get a DocumentationGenerator instance if Gemini is configured
+    
+    Returns:
+        DocumentationGenerator or None if not configured
+    """
+    try:
+        from ..database import get_db
+        from ..models.ai_config import AIConfig, AIProvider
+        from ..utils.encryption import decrypt_value
+        
+        db = get_db()
+        try:
+            # Get Gemini config
+            config = db.query(AIConfig).filter(
+                AIConfig.provider == AIProvider.GEMINI.value,
+                AIConfig.is_active == True
+            ).first()
+            
+            if not config or not config.api_key_encrypted:
+                logger.warning("Gemini not configured for documentation generation")
+                return None
+            
+            # Decrypt API key
+            api_key = decrypt_value(config.api_key_encrypted)
+            if not api_key:
+                logger.warning("Could not decrypt Gemini API key")
+                return None
+            
+            return DocumentationGenerator(api_key=api_key)
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error creating DocumentationGenerator: {e}")
+        return None

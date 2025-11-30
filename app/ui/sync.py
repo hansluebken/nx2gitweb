@@ -508,6 +508,13 @@ def render_database_card(user, server, team, database, container):
                         icon='timeline',
                         on_click=lambda d=database: show_database_timeline_dialog(d)
                     ).props('flat dense color=info')
+                    
+                    # Documentation button - generates AI documentation
+                    ui.button(
+                        'Doku',
+                        icon='description',
+                        on_click=lambda s=server, t=team, d=database: show_documentation_dialog(user, s, t, d)
+                    ).props('flat dense color=purple')
 
                     # GitHub link to folder - get repo name from server
                     github_repo_name = get_repo_name_from_server(server)
@@ -1354,3 +1361,245 @@ def load_sync_history(user, team, container):
 
     finally:
         db.close()
+
+
+def show_documentation_dialog(user, server, team, database):
+    """Show dialog for generating AI documentation"""
+    import logging
+    from concurrent.futures import ThreadPoolExecutor
+    from ..services.doc_generator import DocumentationGenerator, get_documentation_generator
+    from ..models.documentation import Documentation
+    from ..models.ai_config import AIConfig, AIProvider
+    from ..utils.encryption import decrypt_value
+    from ..utils.github_utils import get_repo_name_from_server
+    
+    logger = logging.getLogger(__name__)
+    
+    with ui.dialog() as dialog, ui.card().classes('w-full').style('max-width: 900px; max-height: 90vh;'):
+        # Header
+        with ui.row().classes('w-full items-center justify-between p-4').style(
+            f'background: linear-gradient(135deg, #9333EA 0%, #7C3AED 100%);'
+        ):
+            with ui.row().classes('items-center gap-2'):
+                ui.icon('description', size='md', color='white')
+                ui.label(f'Dokumentation: {database.name}').classes('text-h6 text-white font-bold')
+            ui.button(icon='close', on_click=dialog.close).props('flat color=white')
+        
+        # Content container
+        content_container = ui.column().classes('w-full p-4 gap-4')
+        
+        with content_container:
+            # Check if Gemini is configured
+            db = get_db()
+            try:
+                gemini_config = db.query(AIConfig).filter(
+                    AIConfig.provider == AIProvider.GEMINI.value,
+                    AIConfig.is_active == True
+                ).first()
+                
+                if not gemini_config or not gemini_config.api_key_encrypted:
+                    with ui.card().classes('w-full p-4 bg-amber-50'):
+                        with ui.row().classes('items-center gap-2'):
+                            ui.icon('warning', color='orange')
+                            ui.label('Gemini ist nicht konfiguriert').classes('text-h6 font-bold')
+                        ui.label('Bitte konfigurieren Sie einen Gemini API-Key unter Admin → KI-Konfiguration.').classes('text-grey-7')
+                        ui.button('Zu KI-Konfiguration', icon='settings', on_click=lambda: ui.navigate.to('/admin')).props('color=primary')
+                    return
+                
+                # Get latest documentation if exists
+                latest_doc = db.query(Documentation).filter(
+                    Documentation.database_id == database.id
+                ).order_by(Documentation.generated_at.desc()).first()
+                
+            finally:
+                db.close()
+            
+            # Info section
+            with ui.card().classes('w-full p-4 bg-blue-50'):
+                ui.label('KI-Dokumentation generieren').classes('text-subtitle1 font-bold')
+                ui.label(
+                    'Analysiert die Datenbankstruktur mit Gemini und erstellt eine ausführliche '
+                    'Markdown-Dokumentation. Diese wird im GitHub-Repository als APPLICATION_DOCS.md gespeichert.'
+                ).classes('text-grey-7')
+                
+                with ui.row().classes('items-center gap-4 mt-2'):
+                    ui.label(f'Modell: gemini-2.5-pro').classes('text-sm text-grey-6')
+                    if latest_doc:
+                        ui.label(f'Letzte Generierung: {latest_doc.generated_at.strftime("%d.%m.%Y %H:%M")}').classes('text-sm text-grey-6')
+            
+            # Preview container (initially hidden)
+            preview_container = ui.column().classes('w-full').style('display: none;')
+            
+            # Status container
+            status_container = ui.column().classes('w-full items-center gap-4')
+            
+            # Buttons
+            with ui.row().classes('w-full justify-end gap-2'):
+                generate_btn = ui.button(
+                    'Dokumentation generieren',
+                    icon='auto_awesome',
+                    color='purple'
+                )
+                save_btn = ui.button(
+                    'In GitHub speichern',
+                    icon='cloud_upload',
+                    color='positive'
+                ).props('disable')
+        
+        # Store generated content
+        generated_content = {'markdown': None, 'result': None}
+        
+        async def generate_documentation():
+            """Generate documentation using Gemini"""
+            generate_btn.props('loading disable')
+            
+            with status_container:
+                status_container.clear()
+                ui.spinner(size='lg', color='purple')
+                ui.label('Lade Datenbankstruktur aus GitHub...').classes('text-grey-7')
+            
+            try:
+                # Get structure from GitHub
+                db = get_db()
+                try:
+                    enc_manager = get_encryption_manager()
+                    github_token = enc_manager.decrypt(user.github_token_encrypted)
+                    github = GitHubManager(github_token, user.github_organization)
+                    
+                    repo_name = get_repo_name_from_server(server)
+                    repo = github.ensure_repository(repo_name)
+                    
+                    # Find structure file
+                    structure_path = f"{database.github_path}/{sanitize_name(database.name)}-structure.json"
+                    structure_content = github.get_file_content(repo, structure_path)
+                    
+                    if not structure_content:
+                        raise ValueError(f"Strukturdatei nicht gefunden: {structure_path}")
+                    
+                    structure_json = json.loads(structure_content)
+                    
+                    # Update status
+                    status_container.clear()
+                    with status_container:
+                        ui.spinner(size='lg', color='purple')
+                        ui.label('Generiere Dokumentation mit Gemini...').classes('text-grey-7')
+                        ui.label('Dies kann 30-60 Sekunden dauern.').classes('text-sm text-grey-5')
+                    
+                    # Get generator
+                    generator = get_documentation_generator()
+                    if not generator:
+                        raise ValueError("Gemini ist nicht konfiguriert")
+                    
+                    # Run in thread pool to avoid blocking
+                    loop = asyncio.get_event_loop()
+                    with ThreadPoolExecutor() as pool:
+                        result = await loop.run_in_executor(
+                            pool,
+                            lambda: generator.generate(structure_json, database.name)
+                        )
+                    
+                    if not result.success:
+                        raise ValueError(result.error or "Unbekannter Fehler")
+                    
+                    # Store result
+                    generated_content['markdown'] = result.content
+                    generated_content['result'] = result
+                    
+                    # Show preview
+                    status_container.clear()
+                    preview_container.style('display: block;')
+                    
+                    with preview_container:
+                        preview_container.clear()
+                        with ui.card().classes('w-full'):
+                            with ui.row().classes('w-full items-center justify-between p-2 bg-grey-2'):
+                                ui.label('Vorschau').classes('font-bold')
+                                with ui.row().classes('items-center gap-2'):
+                                    if result.input_tokens:
+                                        ui.badge(f'↓{result.input_tokens}', color='amber').props('dense')
+                                    if result.output_tokens:
+                                        ui.badge(f'↑{result.output_tokens}', color='amber').props('dense')
+                            
+                            # Markdown preview with scroll
+                            with ui.scroll_area().classes('w-full').style('max-height: 400px;'):
+                                ui.markdown(result.content).classes('p-4')
+                    
+                    # Enable save button
+                    save_btn.props(remove='disable')
+                    generate_btn.props(remove='loading disable')
+                    generate_btn.text = 'Neu generieren'
+                    
+                    ui.notify('Dokumentation erfolgreich generiert!', type='positive')
+                    
+                finally:
+                    db.close()
+                    
+            except Exception as e:
+                logger.error(f"Error generating documentation: {e}")
+                status_container.clear()
+                with status_container:
+                    ui.icon('error', size='lg', color='red')
+                    ui.label('Fehler bei der Generierung').classes('text-h6 text-negative')
+                    ui.label(str(e)).classes('text-grey-7')
+                
+                generate_btn.props(remove='loading disable')
+                ui.notify(f'Fehler: {str(e)}', type='negative')
+        
+        async def save_to_github():
+            """Save documentation to GitHub"""
+            if not generated_content['markdown']:
+                ui.notify('Keine Dokumentation zum Speichern', type='warning')
+                return
+            
+            save_btn.props('loading disable')
+            
+            try:
+                db = get_db()
+                try:
+                    enc_manager = get_encryption_manager()
+                    github_token = enc_manager.decrypt(user.github_token_encrypted)
+                    github = GitHubManager(github_token, user.github_organization)
+                    
+                    repo_name = get_repo_name_from_server(server)
+                    repo = github.ensure_repository(repo_name)
+                    
+                    # Save to GitHub
+                    doc_path = f"{database.github_path}/APPLICATION_DOCS.md"
+                    commit_result = github.update_file(
+                        repo,
+                        doc_path,
+                        generated_content['markdown'],
+                        f"Update APPLICATION_DOCS.md via AI ({database.name})"
+                    )
+                    
+                    # Save to database
+                    result = generated_content['result']
+                    doc = Documentation(
+                        database_id=database.id,
+                        content=generated_content['markdown'],
+                        model=result.model,
+                        input_tokens=result.input_tokens,
+                        output_tokens=result.output_tokens,
+                        github_synced=True,
+                        github_synced_at=datetime.now(),
+                        github_commit_sha=commit_result.sha if hasattr(commit_result, 'sha') else None
+                    )
+                    db.add(doc)
+                    db.commit()
+                    
+                    ui.notify('Dokumentation erfolgreich in GitHub gespeichert!', type='positive')
+                    save_btn.props(remove='loading')
+                    save_btn.text = 'Gespeichert ✓'
+                    
+                finally:
+                    db.close()
+                    
+            except Exception as e:
+                logger.error(f"Error saving documentation: {e}")
+                save_btn.props(remove='loading disable')
+                ui.notify(f'Fehler beim Speichern: {str(e)}', type='negative')
+        
+        generate_btn.on_click(generate_documentation)
+        save_btn.on_click(save_to_github)
+    
+    dialog.open()
