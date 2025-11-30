@@ -8,6 +8,8 @@ from .password_reset import PasswordReset
 from .cronjob import Cronjob, CronjobType, IntervalUnit
 from .smtp_config import SmtpConfig
 from .user_preference import UserPreference
+from .ai_config import AIConfig, AIProvider, AVAILABLE_MODELS, DEFAULT_MODELS
+from .changelog import ChangeLog
 
 __all__ = [
     'Base',
@@ -21,5 +23,10 @@ __all__ = [
     'CronjobType',
     'IntervalUnit',
     'SmtpConfig',
-    'UserPreference'
+    'UserPreference',
+    'AIConfig',
+    'AIProvider',
+    'AVAILABLE_MODELS',
+    'DEFAULT_MODELS',
+    'ChangeLog',
 ]

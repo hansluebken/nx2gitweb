@@ -9,38 +9,86 @@ from dataclasses import dataclass
 
 # Known Ninox code fields
 CODE_FIELDS = [
+    # Formula/Script fields
     'fn',              # Formula fields
     'globalCode',      # Global database code
+    
+    # Triggers
     'afterCreate',     # Trigger after record creation
     'afterUpdate',     # Trigger after record update
-    'beforeDelete',    # Trigger before record deletion
     'beforeShow',      # Trigger before view is shown
+    'afterHide',       # Trigger after view is hidden
+    'beforeDelete',    # Trigger before record deletion
     'onClick',         # Button click handler
     'onOpen',          # Trigger when opening
     'onClose',         # Trigger when closing
-    'dchoiceValues',   # Dynamic choice values
     'trigger',         # General triggers
-    'validation',      # Validation formulas
+    
+    # Dynamic choice fields
+    'dchoiceValues',   # Dynamic choice values
+    'dchoiceCaption',  # Dynamic choice caption formula
+    'dchoiceColor',    # Dynamic choice color formula
+    'dchoiceIcon',     # Dynamic choice icon formula
+    
+    # Permissions/Constraints
+    'constraint',      # Constraint formula
     'visibility',      # Visibility formulas
+    'canRead',         # Read permission formula
+    'canWrite',        # Write permission formula
+    'canCreate',       # Create permission formula
+    'canDelete',       # Delete permission formula
+    
+    # Validation
+    'validation',      # Validation formulas
+    
+    # View-specific (handled separately in Views)
+    'expression',      # Expression in Views
+    'filter',          # Filter in Views
+    
+    # Other
     'printout',        # Print layout code
     'color',           # Color formulas (if script-based)
 ]
 
 # Human-readable names for code types
 CODE_TYPE_NAMES = {
+    # Formula/Script
     'fn': 'Formula Field',
     'globalCode': 'Global Code',
+    
+    # Triggers
     'afterCreate': 'After Create Trigger',
     'afterUpdate': 'After Update Trigger',
-    'beforeDelete': 'Before Delete Trigger',
     'beforeShow': 'Before Show Trigger',
+    'afterHide': 'After Hide Trigger',
+    'beforeDelete': 'Before Delete Trigger',
     'onClick': 'Button Click Handler',
     'onOpen': 'On Open Trigger',
     'onClose': 'On Close Trigger',
-    'dchoiceValues': 'Dynamic Choice Values',
     'trigger': 'Trigger',
-    'validation': 'Validation Formula',
+    
+    # Dynamic choice
+    'dchoiceValues': 'Dynamic Choice Values',
+    'dchoiceCaption': 'Dynamic Choice Caption',
+    'dchoiceColor': 'Dynamic Choice Color',
+    'dchoiceIcon': 'Dynamic Choice Icon',
+    
+    # Permissions/Constraints
+    'constraint': 'Constraint Formula',
     'visibility': 'Visibility Formula',
+    'canRead': 'Can Read Permission',
+    'canWrite': 'Can Write Permission',
+    'canCreate': 'Can Create Permission',
+    'canDelete': 'Can Delete Permission',
+    
+    # Validation
+    'validation': 'Validation Formula',
+    
+    # View-specific
+    'expression': 'View Expression',
+    'filter': 'View Filter',
+    
+    # Other
     'printout': 'Print Layout',
     'color': 'Color Formula',
 }
@@ -162,8 +210,14 @@ def extract_code_from_structure(structure: Dict[str, Any], database_name: str = 
         # Use caption first, then name, then ID as fallback
         table_name = table_data.get('caption') or table_data.get('name') or table_id
         
-        # Table-level triggers
-        for code_field in ['afterCreate', 'afterUpdate', 'beforeDelete', 'onOpen', 'onClose']:
+        # Table-level triggers and permissions
+        table_code_fields = [
+            'afterCreate', 'afterUpdate', 'beforeShow', 'afterHide',
+            'beforeDelete', 'onOpen', 'onClose', 'trigger',
+            'canRead', 'canWrite', 'canCreate', 'canDelete',
+            'printout'
+        ]
+        for code_field in table_code_fields:
             if code_field in table_data:
                 code = table_data[code_field]
                 if isinstance(code, str) and code.strip():
@@ -212,7 +266,13 @@ def extract_code_from_structure(structure: Dict[str, Any], database_name: str = 
             # Use caption first, then name, then ID as fallback
             ui_name = ui_data.get('caption') or ui_data.get('name') or ui_id
             
-            for code_field in ['beforeShow', 'onClick', 'onOpen', 'onClose']:
+            # View-level code fields
+            view_code_fields = [
+                'beforeShow', 'afterHide', 'onClick',
+                'onOpen', 'onClose',
+                'expression', 'filter'
+            ]
+            for code_field in view_code_fields:
                 if code_field in ui_data:
                     code = ui_data[code_field]
                     if isinstance(code, str) and code.strip():

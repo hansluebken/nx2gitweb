@@ -10,6 +10,7 @@ from ..models.team import Team
 from ..models.database import Database
 from ..models.audit_log import AuditLog
 from ..models.user_preference import UserPreference
+from ..models.changelog import ChangeLog
 from ..auth import create_audit_log
 from ..utils.encryption import get_encryption_manager
 from ..utils.github_utils import sanitize_name, get_repo_name_from_server
@@ -21,6 +22,7 @@ from .components import (
     NavHeader, Card, FormField, Toast, EmptyState,
     StatusBadge, format_datetime, PRIMARY_COLOR, SUCCESS_COLOR
 )
+from .database_timeline import show_database_timeline_dialog
 import json
 
 
@@ -218,7 +220,7 @@ def render_selectors(user, databases_container, history_container, team_id_param
                 finally:
                     event_db.close()
 
-        # Update databases when team changes
+        # Update teams when server changes
         def on_team_change(e):
             import logging
             logger = logging.getLogger(__name__)
@@ -258,6 +260,152 @@ def render_selectors(user, databases_container, history_container, team_id_param
 
     finally:
         db.close()
+
+
+async def generate_ai_changelog(
+    user,
+    server,
+    team,
+    database,
+    github_mgr,
+    repo,
+    github_path: str,
+    logger
+):
+    """
+    Generate AI-powered changelog entry for the latest commit.
+    Runs in background to not block the sync process.
+    
+    Args:
+        user: Current user object
+        server: Server object
+        team: Team object  
+        database: Database object
+        github_mgr: GitHubManager instance
+        repo: GitHub repository object
+        github_path: Path to the database files in GitHub
+        logger: Logger instance
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from ..services.ai_changelog import get_ai_changelog_service
+    from ..models.ai_config import AIConfig
+    
+    try:
+        # Check if AI is configured
+        db = get_db()
+        ai_config = db.query(AIConfig).filter(
+            AIConfig.is_default == True,
+            AIConfig.is_active == True,
+            AIConfig.api_key_encrypted != None
+        ).first()
+        db.close()
+        
+        if not ai_config:
+            logger.info("AI changelog skipped: No AI provider configured")
+            return
+        
+        logger.info(f"Generating AI changelog for {database.name}...")
+        
+        # Get the latest commit for this database's structure file
+        db_name = sanitize_name(database.name)
+        structure_path = f'{github_path}/{db_name}-structure.json'
+        
+        # Get latest commit
+        latest_commit = github_mgr.get_latest_commit(repo, path=structure_path)
+        
+        if not latest_commit:
+            logger.warning(f"No commits found for {structure_path}")
+            return
+        
+        # Check if we already have a changelog for this commit
+        db = get_db()
+        existing = db.query(ChangeLog).filter(
+            ChangeLog.database_id == database.id,
+            ChangeLog.commit_sha == latest_commit.sha
+        ).first()
+        db.close()
+        
+        if existing:
+            logger.info(f"Changelog already exists for commit {latest_commit.short_sha}")
+            return
+        
+        # Get diff data for this commit
+        diff_data = github_mgr.get_commit_diff_for_changelog(repo, latest_commit.sha, structure_path)
+        
+        if not diff_data or not diff_data.get('full_patch'):
+            logger.info(f"No diff data for commit {latest_commit.short_sha} - skipping AI analysis")
+            # Still create a basic changelog entry without AI
+            db = get_db()
+            changelog = ChangeLog(
+                database_id=database.id,
+                commit_sha=latest_commit.sha,
+                commit_date=latest_commit.date,
+                commit_message=latest_commit.message,
+                commit_url=latest_commit.url,
+                files_changed=latest_commit.files_changed,
+                additions=latest_commit.additions,
+                deletions=latest_commit.deletions,
+                ai_summary=None,
+                ai_details=None,
+            )
+            db.add(changelog)
+            db.commit()
+            db.close()
+            logger.info(f"Created basic changelog entry (no AI) for {latest_commit.short_sha}")
+            return
+        
+        # Run AI analysis in thread pool to not block
+        loop = asyncio.get_event_loop()
+        service = get_ai_changelog_service()
+        
+        def do_ai_analysis():
+            """Blocking AI call"""
+            context = {
+                'database_name': database.name,
+                'changed_items': diff_data.get('changed_items', []),
+            }
+            return service.analyze_diff(
+                diff=diff_data.get('full_patch', ''),
+                context=context
+            )
+        
+        with ThreadPoolExecutor() as executor:
+            analysis = await loop.run_in_executor(executor, do_ai_analysis)
+        
+        # Create changelog entry
+        db = get_db()
+        changelog = ChangeLog(
+            database_id=database.id,
+            commit_sha=latest_commit.sha,
+            commit_date=latest_commit.date,
+            commit_message=latest_commit.message,
+            commit_url=latest_commit.url,
+            files_changed=len(diff_data.get('files', [])),
+            additions=latest_commit.additions,
+            deletions=latest_commit.deletions,
+            ai_summary=analysis.summary if analysis.success else None,
+            ai_details=analysis.details if analysis.success else None,
+            ai_provider=analysis.provider if analysis.success else None,
+            ai_model=analysis.model if analysis.success else None,
+            ai_generated_at=datetime.utcnow() if analysis.success else None,
+            ai_error=analysis.error if not analysis.success else None,
+            diff_patch=diff_data.get('full_patch', '')[:10000],  # Limit size
+            changed_items=diff_data.get('changed_items', []),
+        )
+        db.add(changelog)
+        db.commit()
+        db.close()
+        
+        if analysis.success:
+            logger.info(f"✓ AI changelog created for {database.name} ({analysis.provider}/{analysis.model})")
+        else:
+            logger.warning(f"AI changelog created but analysis failed: {analysis.error}")
+        
+    except Exception as e:
+        logger.error(f"Error generating AI changelog: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
 
 
 def load_databases(user, server, team, container):
@@ -353,6 +501,13 @@ def render_database_card(user, server, team, database, container):
                         icon='account_tree',
                         on_click=lambda s=server, t=team, d=database: show_erd_viewer_dialog(user, s, t, d)
                     ).props('flat dense color=secondary')
+                    
+                    # Timeline button - shows change history
+                    ui.button(
+                        'Timeline',
+                        icon='timeline',
+                        on_click=lambda d=database: show_database_timeline_dialog(d)
+                    ).props('flat dense color=info')
 
                     # GitHub link to folder - get repo name from server
                     github_repo_name = get_repo_name_from_server(server)
@@ -708,13 +863,47 @@ async def sync_database(user, server, team, database, container, progress_label=
                 logger.error(f"Full traceback:\n{traceback.format_exc()}")
                 # Don't fail the whole sync if ERD generation fails
 
-            # Step 6f: Extract and save Ninox code files LOCALLY (not to GitHub)
+            # Step 6f: Save structure.json locally and extract Ninox code files
             code_files_count = 0
             if progress_label:
-                progress_label.text = 'Extracting Ninox code...'
+                progress_label.text = 'Saving structure and extracting code...'
                 await asyncio.sleep(0.1)
 
             try:
+                import os
+                server_name = sanitize_name(server.name)
+                team_name_safe = sanitize_name(team.name)
+                
+                # Base path for local storage
+                local_base_path = f'/app/data/code/{server_name}/{team_name_safe}/{db_name}'
+                os.makedirs(local_base_path, exist_ok=True)
+                
+                # Save structure.json locally for code viewer
+                structure_local_path = f'{local_base_path}/structure.json'
+                with open(structure_local_path, 'w', encoding='utf-8') as f:
+                    json.dump(db_structure, f, indent=2, ensure_ascii=False)
+                logger.info(f"Saved structure.json to {structure_local_path}")
+                
+                # Save complete-backup.json locally (includes views, reports, etc.)
+                backup_local_path = f'{local_base_path}/complete-backup.json'
+                with open(backup_local_path, 'w', encoding='utf-8') as f:
+                    json.dump(complete_backup, f, indent=2, ensure_ascii=False)
+                logger.info(f"Saved complete-backup.json to {backup_local_path}")
+                
+                # Save reports.json separately for easier access
+                if reports_data:
+                    reports_local_path = f'{local_base_path}/reports.json'
+                    with open(reports_local_path, 'w', encoding='utf-8') as f:
+                        json.dump(reports_data, f, indent=2, ensure_ascii=False)
+                    logger.info(f"Saved reports.json to {reports_local_path}")
+                
+                # Save views.json separately for easier access
+                if views_data:
+                    views_local_path = f'{local_base_path}/views.json'
+                    with open(views_local_path, 'w', encoding='utf-8') as f:
+                        json.dump(views_data, f, indent=2, ensure_ascii=False)
+                    logger.info(f"Saved views.json to {views_local_path}")
+                
                 logger.info(f"Extracting Ninox code for {database.name}...")
                 
                 # Extract code from structure
@@ -728,17 +917,9 @@ async def sync_database(user, server, team, database, container, progress_label=
                         progress_label.text = f'Saving {code_files_count} code files...'
                         await asyncio.sleep(0.1)
                     
-                    # Save code files locally instead of uploading to GitHub
-                    import os
-                    server_name = sanitize_name(server.name)
-                    team_name_safe = sanitize_name(team.name)
-                    
-                    # Base path for code storage
-                    code_base_path = f'/app/data/code/{server_name}/{team_name_safe}/{db_name}'
-                    
                     # Save each code file locally
                     for file_path, file_content in code_files.items():
-                        full_local_path = f'{code_base_path}/{file_path}'
+                        full_local_path = f'{local_base_path}/{file_path}'
                         
                         # Create directory if needed
                         os.makedirs(os.path.dirname(full_local_path), exist_ok=True)
@@ -747,7 +928,7 @@ async def sync_database(user, server, team, database, container, progress_label=
                         with open(full_local_path, 'w', encoding='utf-8') as f:
                             f.write(file_content)
                     
-                    logger.info(f"Saved {code_files_count} code files to {code_base_path}")
+                    logger.info(f"Saved {code_files_count} code files to {local_base_path}")
                 else:
                     logger.info(f"No code found in {database.name}")
 
@@ -792,8 +973,27 @@ async def sync_database(user, server, team, database, container, progress_label=
             db.close()
 
             logger.info(f"✓ Sync completed successfully for {database.name}")
-            if not progress_label:  # Only show toast if not using progress dialog
-                Toast.success(f'Database "{database.name}" synced to GitHub successfully!')
+            
+            # Step 8: Generate AI Changelog (non-blocking)
+            if progress_label:
+                progress_label.text = 'Generating AI changelog...'
+                await asyncio.sleep(0.1)
+            
+            try:
+                await generate_ai_changelog(
+                    user=user,
+                    server=server,
+                    team=team,
+                    database=database,
+                    github_mgr=github_mgr,
+                    repo=repo,
+                    github_path=github_path,
+                    logger=logger
+                )
+            except Exception as e:
+                # Don't fail sync if AI changelog fails
+                logger.warning(f"AI Changelog generation failed (non-critical): {e}")
+            # Don't show toast here - it will be shown by the caller or the UI will be updated
         else:
             # Just save structure locally
             logger.info("GitHub not configured, saving locally...")
@@ -814,13 +1014,14 @@ async def sync_database(user, server, team, database, container, progress_label=
 
             db.close()
 
-            Toast.warning(
+            logger.warning(
                 f'Database "{database.name}" synced, but GitHub is not configured. '
                 'Configure GitHub in Profile settings to push to repository.'
             )
 
-        # Reload databases
-        load_databases(user, server, team, container)
+        # Reload databases if container is provided
+        if container:
+            load_databases(user, server, team, container)
 
     except Exception as e:
         logger.error(f"=== SYNC ERROR === Database: {database.name}")
@@ -828,12 +1029,13 @@ async def sync_database(user, server, team, database, container, progress_label=
         logger.error(f"Error message: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
-        Toast.error(f'Error syncing database: {str(e)}')
+        raise  # Re-raise to be caught by caller
 
 
 def sync_all_databases(user, server, team, databases):
     """Sync all non-excluded databases with progress dialog"""
     import logging
+    from nicegui import background_tasks
     logger = logging.getLogger(__name__)
 
     # Filter non-excluded databases
@@ -854,7 +1056,7 @@ def sync_all_databases(user, server, team, databases):
 
     progress_dialog.open()
 
-    # Run as async task in UI context (not background task!)
+    # Run as background task with proper UI context
     async def run_sync_all():
         try:
             success_count = 0
@@ -864,13 +1066,13 @@ def sync_all_databases(user, server, team, databases):
                 try:
                     logger.info(f"Syncing {idx}/{total_count}: {database.name}")
 
-                    # Update progress - works because we're in UI context
+                    # Update progress
                     status_label.text = f'Syncing {idx}/{total_count}: {database.name}'
                     progress_bar.value = (idx - 1) / total_count
                     await asyncio.sleep(0.1)
 
-                    # Sync the database
-                    await sync_database(user, server, team, database, None, None)
+                    # Sync the database (pass progress_label to suppress individual toasts)
+                    await sync_database(user, server, team, database, None, progress_label)
 
                     success_count += 1
 
@@ -884,19 +1086,18 @@ def sync_all_databases(user, server, team, databases):
             await asyncio.sleep(1.5)
             progress_dialog.close()
 
-            # Show result
+            # Log result (no Toast in background task)
             if error_count > 0:
-                Toast.warning(f'Synced {success_count}/{total_count} databases. {error_count} errors.')
+                logger.warning(f'Synced {success_count}/{total_count} databases. {error_count} errors.')
             else:
-                Toast.success(f'Successfully synced all {success_count} databases!')
+                logger.info(f'Successfully synced all {success_count} databases!')
 
         except Exception as e:
             logger.error(f"Bulk sync error: {e}")
             progress_dialog.close()
-            Toast.error(f'Error: {str(e)}')
 
-    # Use asyncio.create_task instead of background_tasks
-    asyncio.create_task(run_sync_all())
+    # Use background_tasks.create to maintain UI context
+    background_tasks.create(run_sync_all())
 
 
 def toggle_database_exclusion(user, database, is_excluded, container):

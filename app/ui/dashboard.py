@@ -6,6 +6,8 @@ from datetime import datetime
 from ..database import get_db
 from ..models.server import Server
 from ..models.team import Team
+from ..models.database import Database
+from ..models.changelog import ChangeLog
 from .components import (
     NavHeader, Card, StatsCard, Toast, EmptyState,
     format_datetime, PRIMARY_COLOR, SUCCESS_COLOR, INFO_COLOR
@@ -37,12 +39,17 @@ def render(user):
         # Statistics cards
         render_stats(user)
 
-        # Quick actions
+        # Quick actions and recent changes
         with ui.row().classes('w-full gap-4'):
             with ui.column().classes('flex-1 gap-4'):
                 render_quick_actions(user)
 
             with ui.column().classes('flex-1 gap-4'):
+                render_recent_changes(user)
+
+        # Recent activity (full width)
+        with ui.row().classes('w-full'):
+            with ui.column().classes('w-full'):
                 render_recent_activity(user)
 
 
@@ -157,6 +164,112 @@ def render_quick_actions(user):
                     pass
 
 
+def render_recent_changes(user):
+    """Render recent changes widget"""
+    db = get_db()
+    
+    try:
+        # Get recent changelogs
+        query = db.query(ChangeLog).join(Database).join(Team).join(Server)
+        
+        if not user.is_admin:
+            query = query.filter(Server.user_id == user.id)
+        
+        recent_changes = query.order_by(ChangeLog.commit_date.desc()).limit(5).all()
+        
+        # Get total count for display
+        total_query = db.query(ChangeLog).join(Database).join(Team).join(Server)
+        if not user.is_admin:
+            total_query = total_query.filter(Server.user_id == user.id)
+        total_count = total_query.count()
+        
+    finally:
+        db.close()
+    
+    with Card(title='Letzte Änderungen', icon='history'):
+        if not recent_changes:
+            with ui.column().classes('w-full items-center justify-center p-4 gap-2'):
+                ui.icon('history', size='2rem', color='grey')
+                ui.label('Keine Änderungen').classes('text-grey-7')
+                ui.label('Änderungen werden bei Synchronisierungen aufgezeichnet.').classes('text-xs text-grey-6 text-center')
+        else:
+            with ui.column().classes('w-full gap-2'):
+                for changelog in recent_changes:
+                    render_change_item(changelog, db)
+                
+                # Link to full changes page
+                if total_count > 5:
+                    ui.separator().classes('my-2')
+                    with ui.row().classes('w-full justify-center'):
+                        ui.button(
+                            f'Alle {total_count} Änderungen anzeigen',
+                            icon='arrow_forward',
+                            on_click=lambda: ui.navigate.to('/changes')
+                        ).props('flat dense')
+
+
+def render_change_item(changelog: ChangeLog, db):
+    """Render a single change item in the dashboard widget"""
+    # Get database name
+    database = db.query(Database).filter(Database.id == changelog.database_id).first()
+    db_name = database.name if database else 'Unbekannt'
+    
+    # Format date relative
+    date_str = format_relative_time(changelog.commit_date)
+    
+    with ui.card().classes('w-full p-3 cursor-pointer').style('background-color: #f8f9fa;').on(
+        'click', lambda: ui.navigate.to('/changes')
+    ):
+        with ui.row().classes('w-full items-start justify-between'):
+            with ui.column().classes('flex-1 gap-1'):
+                # Database name and summary
+                ui.label(db_name).classes('font-bold text-sm')
+                
+                if changelog.ai_summary:
+                    summary = changelog.ai_summary[:60]
+                    if len(changelog.ai_summary) > 60:
+                        summary += '...'
+                    ui.label(summary).classes('text-xs text-grey-7')
+                else:
+                    ui.label(changelog.change_summary_text).classes('text-xs text-grey-7')
+            
+            with ui.column().classes('items-end gap-1'):
+                # Date
+                ui.label(date_str).classes('text-xs text-grey-6')
+                
+                # Stats
+                with ui.row().classes('gap-1'):
+                    if changelog.additions > 0:
+                        ui.label(f'+{changelog.additions}').classes('text-xs text-positive')
+                    if changelog.deletions > 0:
+                        ui.label(f'-{changelog.deletions}').classes('text-xs text-negative')
+
+
+def format_relative_time(dt: datetime) -> str:
+    """Format datetime as relative time (e.g., 'vor 2 Stunden')"""
+    if not dt:
+        return 'Unbekannt'
+    
+    now = datetime.utcnow()
+    diff = now - dt
+    
+    seconds = diff.total_seconds()
+    
+    if seconds < 60:
+        return 'gerade eben'
+    elif seconds < 3600:
+        minutes = int(seconds / 60)
+        return f'vor {minutes} Min.'
+    elif seconds < 86400:
+        hours = int(seconds / 3600)
+        return f'vor {hours} Std.'
+    elif seconds < 604800:
+        days = int(seconds / 86400)
+        return f'vor {days} Tag{"en" if days > 1 else ""}'
+    else:
+        return dt.strftime('%d.%m.%Y')
+
+
 def render_recent_activity(user):
     """Render recent activity section"""
     db = get_db()
@@ -173,7 +286,7 @@ def render_recent_activity(user):
     finally:
         db.close()
 
-    with Card(title='Recent Activity', icon='history'):
+    with Card(title='Recent Activity', icon='sync'):
         if not recent_teams:
             EmptyState.render(
                 icon='history',

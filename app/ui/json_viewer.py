@@ -407,15 +407,18 @@ def show_json_viewer_dialog(user, server, team, database):
 
             logger.info(f"JSON loaded successfully: {len(content)} characters")
 
+            # Transform JSON to use captions instead of IDs for better readability
+            json_data_display = transform_json_keys_to_captions(json_data)
+
             # Update UI - hide loading, show JSON container
             loading_container.style('display: none;')
             json_container.style('display: block;')
 
-            # Create JSON editor with the loaded data
+            # Create JSON editor with the transformed data (captions as keys)
             json_editor_placeholder.clear()
             with json_editor_placeholder:
                 ui.json_editor({
-                    'content': {'json': json_data},
+                    'content': {'json': json_data_display},
                     'mode': 'tree',
                     'modes': ['tree', 'view', 'code', 'text'],
                     'search': True,
@@ -477,3 +480,136 @@ def show_json_viewer_dialog(user, server, team, database):
 def download_json(database):
     """Trigger JSON download"""
     Toast.info(f'Downloading {database.name}-structure.json...')
+
+
+def transform_json_keys_to_captions(data, parent_key=None, path=None, lookups=None):
+    """
+    Transform JSON structure to use captions instead of IDs as keys.
+    This makes the tree view more readable by showing human-friendly names.
+    
+    Handles Ninox-specific structures:
+    - schema.schema.types.{ID} -> types.{caption}
+    - types.{ID}.fields.{ID} -> fields.{caption}
+    - types.{ID}.uis.{ID} -> uis.{caption}
+    - fields.{ID}.values.{ID} -> values.{caption} (for choice fields)
+    - refTypeId/refFieldId -> resolved to caption names
+    
+    For example:
+    - types.E -> types["Mengeneinheiten"] (using caption from E)
+    - fields.A -> fields["Mengeneinheit"] (using caption from A)
+    - values.1 -> values["Text"] (using caption from choice value)
+    - refTypeId: "T" -> refTypeId: "T (Grunddaten)"
+    """
+    if path is None:
+        path = []
+    
+    # Build lookup tables on first call
+    if lookups is None:
+        lookups = _build_ninox_lookups(data)
+    
+    if isinstance(data, dict):
+        # Keys that contain ID-based mappings where values have 'caption'
+        id_based_keys = ('types', 'fields', 'uis', 'values')
+        
+        # Check if this dictionary's children should be transformed
+        # (when parent_key is one of the ID-based keys)
+        if parent_key in id_based_keys:
+            transformed = {}
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    # Get caption for display, keep original ID in the data
+                    caption = value.get('caption') or value.get('name') or key
+                    # Add original ID to the value for reference
+                    value_with_id = dict(value)
+                    value_with_id['_id'] = key
+                    # Use caption as key, recursively transform children
+                    transformed[caption] = transform_json_keys_to_captions(
+                        value_with_id, key, path + [parent_key, caption], lookups
+                    )
+                else:
+                    transformed[key] = value
+            return transformed
+        else:
+            # Regular dict - recursively transform values, resolving reference IDs
+            transformed = {}
+            for k, v in data.items():
+                new_value = transform_json_keys_to_captions(v, k, path + [k], lookups)
+                
+                # Resolve reference IDs to show caption alongside
+                if k == 'refTypeId' and isinstance(v, str) and lookups.get('types'):
+                    caption = lookups['types'].get(v)
+                    if caption and caption != v:
+                        new_value = f"{v} ({caption})"
+                elif k == 'refFieldId' and isinstance(v, str) and lookups.get('fields'):
+                    caption = lookups['fields'].get(v)
+                    if caption and caption != v:
+                        new_value = f"{v} ({caption})"
+                
+                transformed[k] = new_value
+            return transformed
+    elif isinstance(data, list):
+        # Transform list items
+        transformed_list = []
+        for i, item in enumerate(data):
+            if isinstance(item, dict):
+                transformed_list.append(
+                    transform_json_keys_to_captions(item, parent_key, path + [str(i)], lookups)
+                )
+            else:
+                transformed_list.append(item)
+        return transformed_list
+    else:
+        return data
+
+
+def _build_ninox_lookups(data):
+    """
+    Build lookup dictionaries for type and field IDs to captions.
+    This allows resolving refTypeId and refFieldId to human-readable names.
+    """
+    lookups = {
+        'types': {},   # type_id -> caption
+        'fields': {},  # field_id -> caption (note: field IDs may not be unique across tables)
+    }
+    
+    if not isinstance(data, dict):
+        return lookups
+    
+    # Find types in various locations
+    types = None
+    
+    # Try schema.schema.types (complete backup format)
+    if 'schema' in data:
+        schema = data['schema']
+        if isinstance(schema, dict):
+            if 'schema' in schema and isinstance(schema['schema'], dict):
+                types = schema['schema'].get('types', {})
+            elif 'types' in schema:
+                types = schema.get('types', {})
+    
+    # Try direct types (structure format)
+    if not types and 'types' in data:
+        types = data.get('types', {})
+    
+    if not types or not isinstance(types, dict):
+        return lookups
+    
+    # Build type lookup
+    for type_id, type_data in types.items():
+        if isinstance(type_data, dict):
+            # Check if key is already caption or if we need _id
+            actual_id = type_data.get('_id', type_id)
+            caption = type_data.get('caption') or type_data.get('name') or type_id
+            lookups['types'][actual_id] = caption
+            
+            # Build field lookup for this type
+            fields = type_data.get('fields', {})
+            if isinstance(fields, dict):
+                for field_id, field_data in fields.items():
+                    if isinstance(field_data, dict):
+                        actual_field_id = field_data.get('_id', field_id)
+                        field_caption = field_data.get('caption') or field_data.get('name') or field_id
+                        # Store with type context to help disambiguation
+                        lookups['fields'][actual_field_id] = field_caption
+    
+    return lookups

@@ -2,9 +2,13 @@
 Database model for Ninox databases
 """
 from datetime import datetime
+from typing import List, TYPE_CHECKING
 from sqlalchemy import String, Boolean, Integer, ForeignKey, DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from .changelog import ChangeLog
 
 
 class Database(Base, TimestampMixin):
@@ -25,6 +29,12 @@ class Database(Base, TimestampMixin):
 
     # Relationships
     team: Mapped["Team"] = relationship("Team", back_populates="databases")
+    changelogs: Mapped[List["ChangeLog"]] = relationship(
+        "ChangeLog", 
+        back_populates="database",
+        cascade="all, delete-orphan",
+        order_by="desc(ChangeLog.commit_date)"
+    )
 
     def __repr__(self) -> str:
         return f"<Database(name='{self.name}', database_id='{self.database_id}', team_id={self.team_id})>"

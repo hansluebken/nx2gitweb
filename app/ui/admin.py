@@ -9,10 +9,12 @@ from ..models.server import Server
 from ..models.team import Team
 from ..models.database import Database
 from ..models.audit_log import AuditLog
+from ..models.ai_config import AIConfig, AIProvider, AVAILABLE_MODELS, DEFAULT_MODELS
 from ..auth import (
     register_user, activate_user, deactivate_user, create_audit_log,
     UserExistsError
 )
+from ..utils.encryption import get_encryption_manager
 from .components import (
     NavHeader, Card, FormField, Toast, ConfirmDialog,
     DataTable, StatusBadge, format_datetime, PRIMARY_COLOR,
@@ -40,6 +42,7 @@ def render(user):
         with ui.tabs().classes('w-full') as tabs:
             overview_tab = ui.tab('Overview', icon='dashboard')
             users_tab = ui.tab('Users', icon='people')
+            ai_tab = ui.tab('KI-Konfiguration', icon='psychology')
             smtp_tab = ui.tab('SMTP Config', icon='email')
             audit_tab = ui.tab('Audit Logs', icon='receipt_long')
             stats_tab = ui.tab('Statistics', icon='analytics')
@@ -53,6 +56,10 @@ def render(user):
             with ui.tab_panel(users_tab):
                 render_users_management(user)
 
+            # AI Configuration panel
+            with ui.tab_panel(ai_tab):
+                render_ai_config(user)
+
             # SMTP Configuration panel
             with ui.tab_panel(smtp_tab):
                 render_smtp_config(user)
@@ -64,6 +71,417 @@ def render(user):
             # Statistics panel
             with ui.tab_panel(stats_tab):
                 render_statistics(user)
+
+
+def render_ai_config(user):
+    """Render AI provider configuration"""
+    encryption = get_encryption_manager()
+    
+    with ui.column().classes('w-full gap-4'):
+        ui.label('KI-Konfiguration').classes('text-h5 font-bold')
+        ui.label(
+            'Konfigurieren Sie die KI-Provider für die automatische Änderungsanalyse. '
+            'Die Beschreibungen werden auf Deutsch generiert.'
+        ).classes('text-grey-7 mb-4')
+        
+        # Container for provider cards
+        providers_container = ui.column().classes('w-full gap-4')
+        
+        def load_providers():
+            """Load and display all provider configurations"""
+            providers_container.clear()
+            
+            db = get_db()
+            try:
+                # Get or create default configurations
+                configs = db.query(AIConfig).all()
+                
+                # Create missing provider configs
+                existing_providers = {c.provider for c in configs}
+                for provider in AIProvider:
+                    if provider.value not in existing_providers:
+                        new_config = AIConfig(
+                            provider=provider.value,
+                            model=DEFAULT_MODELS.get(provider, ''),
+                            is_default=(provider == AIProvider.CLAUDE and not configs),
+                            is_active=True,
+                            max_tokens=1000,
+                            temperature=0.3,
+                        )
+                        db.add(new_config)
+                        configs.append(new_config)
+                
+                db.commit()
+                
+                # Refresh to get IDs
+                configs = db.query(AIConfig).order_by(AIConfig.provider).all()
+                
+                with providers_container:
+                    for config in configs:
+                        render_provider_card(config, user, providers_container, load_providers)
+                        
+            finally:
+                db.close()
+        
+        load_providers()
+
+
+def render_provider_card(config: AIConfig, user, container, reload_callback):
+    """Render a single provider configuration card"""
+    encryption = get_encryption_manager()
+    
+    # Provider display info
+    provider_info = {
+        'claude': {'name': 'Claude (Anthropic)', 'icon': 'smart_toy', 'color': '#8B5CF6'},
+        'openai': {'name': 'OpenAI', 'icon': 'auto_awesome', 'color': '#10A37F'},
+        'gemini': {'name': 'Google Gemini', 'icon': 'stars', 'color': '#4285F4'},
+    }
+    
+    info = provider_info.get(config.provider, {'name': config.provider, 'icon': 'psychology', 'color': PRIMARY_COLOR})
+    
+    border_style = f'border-left: 4px solid {info["color"]};'
+    if config.is_default:
+        border_style = f'border: 2px solid {info["color"]};'
+    
+    with ui.card().classes('w-full p-4').style(border_style):
+        with ui.row().classes('w-full items-center justify-between'):
+            # Provider info
+            with ui.row().classes('items-center gap-3'):
+                ui.icon(info['icon'], size='lg').style(f'color: {info["color"]};')
+                with ui.column().classes('gap-1'):
+                    with ui.row().classes('items-center gap-2'):
+                        ui.label(info['name']).classes('text-h6 font-bold')
+                        if config.is_default:
+                            ui.badge('Standard', color='primary')
+                        if not config.is_active:
+                            ui.badge('Inaktiv', color='grey')
+                    
+                    # Status line
+                    if config.is_configured:
+                        if config.last_test_success is True:
+                            ui.label('Verbunden').classes('text-positive text-sm')
+                        elif config.last_test_success is False:
+                            ui.label('Verbindungsfehler').classes('text-negative text-sm')
+                        else:
+                            ui.label('Konfiguriert (nicht getestet)').classes('text-warning text-sm')
+                    else:
+                        ui.label('Nicht konfiguriert').classes('text-grey-6 text-sm')
+            
+            # Actions
+            with ui.row().classes('gap-2'):
+                ui.button(
+                    'Konfigurieren',
+                    icon='settings',
+                    on_click=lambda c=config: show_provider_config_dialog(c, user, reload_callback)
+                ).props('flat dense')
+                
+                if config.is_configured:
+                    ui.button(
+                        'Testen',
+                        icon='play_arrow',
+                        on_click=lambda c=config: test_provider_connection(c, reload_callback)
+                    ).props('flat dense color=primary')
+                
+                if not config.is_default and config.is_configured:
+                    ui.button(
+                        'Als Standard',
+                        icon='star',
+                        on_click=lambda c=config: set_default_provider(c, reload_callback)
+                    ).props('flat dense color=warning')
+
+
+def show_provider_config_dialog(config: AIConfig, user, reload_callback):
+    """Show dialog to configure a provider"""
+    encryption = get_encryption_manager()
+    
+    # Decrypt existing API key for display (masked)
+    existing_key = ""
+    if config.api_key_encrypted:
+        try:
+            existing_key = encryption.decrypt(config.api_key_encrypted)
+        except Exception:
+            existing_key = ""
+    
+    with ui.dialog() as dialog, ui.card().classes('w-full p-6').style('min-width: 500px;'):
+        ui.label(f'{config.display_name} konfigurieren').classes('text-h5 font-bold mb-4')
+        
+        # API Key input
+        api_key_input = ui.input(
+            label='API-Key',
+            placeholder='sk-...' if config.provider == 'openai' else 'API-Key eingeben',
+            password=True,
+            password_toggle_button=True,
+            value=existing_key
+        ).classes('w-full mb-2')
+        
+        if config.provider == 'claude':
+            ui.label('Anthropic API-Key von console.anthropic.com').classes('text-caption text-grey-7 mb-4')
+        elif config.provider == 'openai':
+            ui.label('OpenAI API-Key von platform.openai.com').classes('text-caption text-grey-7 mb-4')
+        elif config.provider == 'gemini':
+            ui.label('Google AI API-Key von aistudio.google.com').classes('text-caption text-grey-7 mb-4')
+        
+        # Model selection
+        model_options = AVAILABLE_MODELS.get(AIProvider(config.provider), [])
+        model_select = ui.select(
+            label='Modell',
+            options=model_options,
+            value=config.model if config.model in model_options else (model_options[0] if model_options else '')
+        ).classes('w-full mb-4')
+        
+        # Advanced settings
+        with ui.expansion('Erweiterte Einstellungen', icon='tune').classes('w-full mb-4'):
+            with ui.column().classes('w-full gap-2 p-2'):
+                max_tokens_input = ui.number(
+                    label='Max Tokens',
+                    value=config.max_tokens,
+                    min=100,
+                    max=4000,
+                    step=100
+                ).classes('w-full')
+                
+                temperature_input = ui.number(
+                    label='Temperature',
+                    value=config.temperature,
+                    min=0.0,
+                    max=1.0,
+                    step=0.1,
+                    format='%.1f'
+                ).classes('w-full')
+                
+                is_active_switch = ui.switch(
+                    'Provider aktiv',
+                    value=config.is_active
+                )
+        
+        error_label = ui.label('').classes('text-negative')
+        error_label.visible = False
+        
+        async def save_config():
+            """Save the provider configuration"""
+            api_key = api_key_input.value.strip()
+            model = model_select.value
+            max_tokens = int(max_tokens_input.value) if max_tokens_input.value else 1000
+            temperature = float(temperature_input.value) if temperature_input.value else 0.3
+            is_active = is_active_switch.value
+            
+            if not api_key:
+                error_label.text = 'Bitte geben Sie einen API-Key ein'
+                error_label.visible = True
+                return
+            
+            if not model:
+                error_label.text = 'Bitte wählen Sie ein Modell aus'
+                error_label.visible = True
+                return
+            
+            db = get_db()
+            try:
+                # Reload config to avoid stale data
+                db_config = db.query(AIConfig).filter(AIConfig.id == config.id).first()
+                if not db_config:
+                    error_label.text = 'Konfiguration nicht gefunden'
+                    error_label.visible = True
+                    return
+                
+                # Encrypt and save API key
+                db_config.api_key_encrypted = encryption.encrypt(api_key)
+                db_config.model = model
+                db_config.max_tokens = max_tokens
+                db_config.temperature = temperature
+                db_config.is_active = is_active
+                db_config.last_test_success = None  # Reset test status
+                db_config.last_test_at = None
+                
+                db.commit()
+                
+                Toast.success(f'{config.display_name} wurde konfiguriert')
+                dialog.close()
+                reload_callback()
+                
+            except Exception as e:
+                error_label.text = f'Fehler beim Speichern: {str(e)}'
+                error_label.visible = True
+            finally:
+                db.close()
+        
+        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+            ui.button('Abbrechen', on_click=dialog.close).props('flat')
+            ui.button('Speichern', on_click=save_config, color='primary')
+    
+    dialog.open()
+
+
+def test_provider_connection(config: AIConfig, reload_callback):
+    """Show dialog to test provider connection with optional question"""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from ..services.ai_changelog import get_ai_changelog_service
+    
+    encryption = get_encryption_manager()
+    
+    # Decrypt API key
+    try:
+        api_key = encryption.decrypt(config.api_key_encrypted)
+    except Exception:
+        Toast.error('API-Key konnte nicht entschlüsselt werden')
+        return
+    
+    # Provider info for display
+    provider_info = {
+        'claude': {'name': 'Claude (Anthropic)', 'icon': 'smart_toy', 'color': '#8B5CF6'},
+        'openai': {'name': 'OpenAI', 'icon': 'auto_awesome', 'color': '#10A37F'},
+        'gemini': {'name': 'Google Gemini', 'icon': 'stars', 'color': '#4285F4'},
+    }
+    info = provider_info.get(config.provider, {'name': config.provider, 'icon': 'psychology', 'color': PRIMARY_COLOR})
+    
+    with ui.dialog() as dialog, ui.card().classes('w-full p-6').style('min-width: 600px; max-width: 800px;'):
+        with ui.row().classes('w-full items-center gap-3 mb-4'):
+            ui.icon(info['icon'], size='lg').style(f'color: {info["color"]};')
+            ui.label(f'{info["name"]} testen').classes('text-h5 font-bold')
+        
+        ui.label(f'Modell: {config.model}').classes('text-grey-7 mb-4')
+        
+        # Status container
+        status_container = ui.column().classes('w-full gap-2 mb-4')
+        
+        # Question input
+        ui.label('Testfrage (optional):').classes('font-bold')
+        question_input = ui.textarea(
+            placeholder='Stelle eine Frage an die KI, z.B. "Was ist 2+2?" oder "Erkläre mir kurz was Python ist."',
+            value='Was ist die Hauptstadt von Deutschland?'
+        ).classes('w-full').props('outlined rows=2')
+        
+        # Answer container (initially hidden)
+        answer_container = ui.column().classes('w-full gap-2 mt-4')
+        answer_container.visible = False
+        
+        # Button reference for disabling during test
+        test_button = None
+        
+        def do_api_call(service, provider, key, model, question):
+            """Blocking API call to run in thread pool"""
+            if question:
+                return service.ask_question(
+                    provider_name=provider,
+                    api_key=key,
+                    model=model,
+                    question=question,
+                    max_tokens=500,
+                    temperature=0.7
+                )
+            else:
+                result = service.test_provider(provider, key, model)
+                result['answer'] = ''
+                return result
+        
+        async def run_test():
+            """Run the connection test in background thread"""
+            nonlocal test_button
+            
+            status_container.clear()
+            answer_container.clear()
+            answer_container.visible = False
+            
+            # Disable button during test
+            if test_button:
+                test_button.disable()
+            
+            with status_container:
+                with ui.row().classes('items-center gap-2'):
+                    ui.spinner(size='sm')
+                    ui.label('Verbindung wird getestet... (kann einige Sekunden dauern)').classes('text-grey-7')
+            
+            service = get_ai_changelog_service()
+            question = question_input.value.strip()
+            
+            # Run blocking API call in thread pool to not block the event loop
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor() as executor:
+                result = await loop.run_in_executor(
+                    executor,
+                    do_api_call,
+                    service,
+                    config.provider,
+                    api_key,
+                    config.model,
+                    question
+                )
+            
+            # Update test status in database
+            db = get_db()
+            try:
+                db_config = db.query(AIConfig).filter(AIConfig.id == config.id).first()
+                if db_config:
+                    db_config.last_test_at = datetime.utcnow()
+                    db_config.last_test_success = result['success']
+                    db_config.last_test_error = result.get('error')
+                    db.commit()
+            finally:
+                db.close()
+            
+            # Show result
+            status_container.clear()
+            with status_container:
+                if result['success']:
+                    with ui.row().classes('items-center gap-2'):
+                        ui.icon('check_circle', color='positive', size='sm')
+                        ui.label('Verbindung erfolgreich!').classes('text-positive font-bold')
+                else:
+                    with ui.column().classes('gap-1'):
+                        with ui.row().classes('items-center gap-2'):
+                            ui.icon('error', color='negative', size='sm')
+                            ui.label('Verbindungsfehler').classes('text-negative font-bold')
+                        ui.label(result.get('error', 'Unbekannter Fehler')).classes('text-negative text-sm')
+            
+            # Show answer if available
+            if result.get('answer'):
+                answer_container.visible = True
+                with answer_container:
+                    ui.separator()
+                    ui.label('Antwort der KI:').classes('font-bold text-grey-8')
+                    with ui.card().classes('w-full p-4 mt-2').style('background-color: #f5f5f5;'):
+                        ui.markdown(result['answer']).classes('text-body1')
+            
+            # Re-enable button
+            if test_button:
+                test_button.enable()
+            
+            # Don't call reload_callback here - it would close the dialog
+            # The callback is only needed when closing the dialog
+        
+        def close_and_reload():
+            dialog.close()
+            reload_callback()
+        
+        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+            ui.button('Schließen', on_click=close_and_reload).props('flat')
+            test_button = ui.button('Test ausführen', icon='play_arrow', on_click=run_test, color='primary')
+    
+    dialog.open()
+
+
+def set_default_provider(config: AIConfig, reload_callback):
+    """Set a provider as the default"""
+    db = get_db()
+    try:
+        # Remove default from all providers
+        db.query(AIConfig).update({AIConfig.is_default: False})
+        
+        # Set this provider as default
+        db_config = db.query(AIConfig).filter(AIConfig.id == config.id).first()
+        if db_config:
+            db_config.is_default = True
+        
+        db.commit()
+        Toast.success(f'{config.display_name} ist jetzt der Standard-Provider')
+        
+    except Exception as e:
+        Toast.error(f'Fehler: {str(e)}')
+    finally:
+        db.close()
+    
+    reload_callback()
 
 
 def render_smtp_config(user):

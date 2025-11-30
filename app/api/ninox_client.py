@@ -313,7 +313,7 @@ class NinoxClient:
     # Views API - Ansichten einer Datenbank
     # =========================================================================
     
-    def get_views(self, team_id: str, database_id: str, full_view: bool = True) -> List[Dict]:
+    def get_views(self, team_id: str, database_id: str, full_view: bool = True, format_scripts: bool = True) -> List[Dict]:
         """
         Holt alle Views (Ansichten) einer Datenbank
         
@@ -321,6 +321,7 @@ class NinoxClient:
             team_id: ID des Teams
             database_id: ID der Datenbank
             full_view: Ob vollständige View-Daten geholt werden sollen (inkl. Konfiguration)
+            format_scripts: Ob eingebettete Skripte formatiert werden sollen (Feldnamen statt IDs)
         
         Returns:
             Liste der Views mit allen Eigenschaften
@@ -328,6 +329,8 @@ class NinoxClient:
         params = {}
         if full_view:
             params['fullView'] = 'true'
+        if format_scripts:
+            params['formatScripts'] = 'T'
         
         result = self._make_request(
             'GET',
@@ -360,7 +363,7 @@ class NinoxClient:
     # Reports API - Berichte einer Datenbank
     # =========================================================================
     
-    def get_reports(self, team_id: str, database_id: str, full_report: bool = True) -> List[Dict]:
+    def get_reports(self, team_id: str, database_id: str, full_report: bool = True, format_scripts: bool = True) -> List[Dict]:
         """
         Holt alle Reports (Berichte) einer Datenbank
         
@@ -368,6 +371,7 @@ class NinoxClient:
             team_id: ID des Teams
             database_id: ID der Datenbank
             full_report: Ob vollständige Report-Daten geholt werden sollen
+            format_scripts: Ob eingebettete Skripte formatiert werden sollen (Feldnamen statt IDs)
         
         Returns:
             Liste der Reports mit allen Eigenschaften
@@ -375,6 +379,8 @@ class NinoxClient:
         params = {}
         if full_report:
             params['fullReport'] = 'true'
+        if format_scripts:
+            params['formatScripts'] = 'T'
         
         result = self._make_request(
             'GET',

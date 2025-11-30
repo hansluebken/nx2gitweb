@@ -7,13 +7,43 @@ import base64
 import json
 from typing import Optional, Dict, List, Any
 from datetime import datetime
+from dataclasses import dataclass, field
 try:
     from github import Github, GithubException
     from github.Organization import Organization
     from github.AuthenticatedUser import AuthenticatedUser
+    from github.Commit import Commit
+    from github.Repository import Repository
 except ImportError:
     print("PyGithub nicht installiert. Bitte 'pip install PyGithub' ausführen.")
     raise
+
+
+@dataclass
+class CommitInfo:
+    """Structured commit information"""
+    sha: str
+    short_sha: str
+    message: str
+    date: datetime
+    author_name: str
+    author_email: str
+    url: str
+    files_changed: int = 0
+    additions: int = 0
+    deletions: int = 0
+    files: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class FileDiff:
+    """Structured file diff information"""
+    filename: str
+    status: str  # added, modified, removed, renamed
+    additions: int
+    deletions: int
+    changes: int
+    patch: str  # The actual diff content
 
 
 class GitHubManager:
@@ -354,3 +384,376 @@ databases/
                 print(f"    ℹ Branch existiert bereits: {branch_name}")
                 return branch_name
             raise
+    
+    # =========================================================================
+    # Commit History & Diff Methods (for ChangeLog feature)
+    # =========================================================================
+    
+    def get_commits(
+        self, 
+        repo, 
+        path: Optional[str] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        max_count: int = 100
+    ) -> List[CommitInfo]:
+        """
+        Holt Commit-Historie für ein Repository oder eine spezifische Datei
+        
+        Args:
+            repo: Repository Objekt
+            path: Optional - Pfad zur Datei (nur Commits für diese Datei)
+            since: Optional - Nur Commits nach diesem Datum
+            until: Optional - Nur Commits vor diesem Datum
+            max_count: Maximale Anzahl der Commits (default: 100)
+        
+        Returns:
+            Liste von CommitInfo Objekten
+        """
+        try:
+            # Build query parameters
+            kwargs = {}
+            if path:
+                kwargs['path'] = path
+            if since:
+                kwargs['since'] = since
+            if until:
+                kwargs['until'] = until
+            
+            commits = repo.get_commits(**kwargs)
+            
+            result = []
+            for i, commit in enumerate(commits):
+                if i >= max_count:
+                    break
+                
+                # Convert PaginatedList to list to get length
+                files_list = list(commit.files) if commit.files else []
+                
+                commit_info = CommitInfo(
+                    sha=commit.sha,
+                    short_sha=commit.sha[:7],
+                    message=commit.commit.message,
+                    date=commit.commit.author.date,
+                    author_name=commit.commit.author.name,
+                    author_email=commit.commit.author.email,
+                    url=commit.html_url,
+                    files_changed=len(files_list),
+                    additions=commit.stats.additions if commit.stats else 0,
+                    deletions=commit.stats.deletions if commit.stats else 0,
+                )
+                result.append(commit_info)
+            
+            return result
+            
+        except GithubException as e:
+            print(f"Fehler beim Abrufen der Commits: {e}")
+            return []
+    
+    def get_commit_details(self, repo, commit_sha: str) -> Optional[CommitInfo]:
+        """
+        Holt detaillierte Informationen zu einem spezifischen Commit
+        
+        Args:
+            repo: Repository Objekt
+            commit_sha: SHA des Commits
+        
+        Returns:
+            CommitInfo mit allen Details inkl. geänderter Dateien
+        """
+        try:
+            commit = repo.get_commit(commit_sha)
+            
+            # Collect file changes
+            files = []
+            for file in commit.files:
+                files.append({
+                    'filename': file.filename,
+                    'status': file.status,  # added, modified, removed, renamed
+                    'additions': file.additions,
+                    'deletions': file.deletions,
+                    'changes': file.changes,
+                    'patch': file.patch if hasattr(file, 'patch') and file.patch else '',
+                    'previous_filename': file.previous_filename if hasattr(file, 'previous_filename') else None,
+                })
+            
+            return CommitInfo(
+                sha=commit.sha,
+                short_sha=commit.sha[:7],
+                message=commit.commit.message,
+                date=commit.commit.author.date,
+                author_name=commit.commit.author.name,
+                author_email=commit.commit.author.email,
+                url=commit.html_url,
+                files_changed=len(files),
+                additions=commit.stats.additions if commit.stats else 0,
+                deletions=commit.stats.deletions if commit.stats else 0,
+                files=files,
+            )
+            
+        except GithubException as e:
+            print(f"Fehler beim Abrufen des Commits {commit_sha}: {e}")
+            return None
+    
+    def get_file_commits(
+        self, 
+        repo, 
+        file_path: str,
+        max_count: int = 50
+    ) -> List[CommitInfo]:
+        """
+        Holt alle Commits die eine spezifische Datei betreffen
+        
+        Args:
+            repo: Repository Objekt
+            file_path: Pfad zur Datei im Repository
+            max_count: Maximale Anzahl der Commits
+        
+        Returns:
+            Liste von CommitInfo Objekten
+        """
+        return self.get_commits(repo, path=file_path, max_count=max_count)
+    
+    def get_file_diff(self, repo, file_path: str, commit_sha: str) -> Optional[FileDiff]:
+        """
+        Holt den Diff einer spezifischen Datei für einen Commit
+        
+        Args:
+            repo: Repository Objekt
+            file_path: Pfad zur Datei
+            commit_sha: SHA des Commits
+        
+        Returns:
+            FileDiff Objekt oder None
+        """
+        try:
+            commit = repo.get_commit(commit_sha)
+            
+            for file in commit.files:
+                if file.filename == file_path:
+                    return FileDiff(
+                        filename=file.filename,
+                        status=file.status,
+                        additions=file.additions,
+                        deletions=file.deletions,
+                        changes=file.changes,
+                        patch=file.patch if hasattr(file, 'patch') and file.patch else '',
+                    )
+            
+            return None
+            
+        except GithubException as e:
+            print(f"Fehler beim Abrufen des Diffs: {e}")
+            return None
+    
+    def compare_commits(
+        self, 
+        repo, 
+        base_sha: str, 
+        head_sha: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Vergleicht zwei Commits und gibt die Unterschiede zurück
+        
+        Args:
+            repo: Repository Objekt
+            base_sha: SHA des Basis-Commits (älter)
+            head_sha: SHA des Head-Commits (neuer)
+        
+        Returns:
+            Dict mit Vergleichsinformationen:
+            {
+                'ahead_by': int,
+                'behind_by': int,
+                'total_commits': int,
+                'files': List[FileDiff],
+                'commits': List[CommitInfo]
+            }
+        """
+        try:
+            comparison = repo.compare(base_sha, head_sha)
+            
+            files = []
+            for file in comparison.files:
+                files.append(FileDiff(
+                    filename=file.filename,
+                    status=file.status,
+                    additions=file.additions,
+                    deletions=file.deletions,
+                    changes=file.changes,
+                    patch=file.patch if hasattr(file, 'patch') and file.patch else '',
+                ))
+            
+            commits = []
+            for commit in comparison.commits:
+                commits.append(CommitInfo(
+                    sha=commit.sha,
+                    short_sha=commit.sha[:7],
+                    message=commit.commit.message,
+                    date=commit.commit.author.date,
+                    author_name=commit.commit.author.name,
+                    author_email=commit.commit.author.email,
+                    url=commit.html_url,
+                ))
+            
+            return {
+                'ahead_by': comparison.ahead_by,
+                'behind_by': comparison.behind_by,
+                'total_commits': comparison.total_commits,
+                'files': files,
+                'commits': commits,
+                'diff_url': comparison.diff_url,
+                'patch_url': comparison.patch_url,
+            }
+            
+        except GithubException as e:
+            print(f"Fehler beim Vergleichen der Commits: {e}")
+            return None
+    
+    def get_latest_commit(self, repo, path: Optional[str] = None) -> Optional[CommitInfo]:
+        """
+        Holt den neuesten Commit (optional für eine spezifische Datei)
+        
+        Args:
+            repo: Repository Objekt
+            path: Optional - Pfad zur Datei
+        
+        Returns:
+            CommitInfo des neuesten Commits oder None
+        """
+        commits = self.get_commits(repo, path=path, max_count=1)
+        return commits[0] if commits else None
+    
+    def get_commit_diff_for_changelog(
+        self, 
+        repo, 
+        commit_sha: str,
+        file_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Holt alle relevanten Informationen für einen ChangeLog-Eintrag
+        
+        Args:
+            repo: Repository Objekt
+            commit_sha: SHA des Commits
+            file_path: Optional - Nur Diff für diese Datei
+        
+        Returns:
+            Dict mit allen Informationen für ChangeLog:
+            {
+                'commit': CommitInfo,
+                'files': List[Dict],
+                'full_patch': str,
+                'changed_items': List[Dict]  # Parsed changes for Ninox code
+            }
+        """
+        commit_info = self.get_commit_details(repo, commit_sha)
+        
+        if not commit_info:
+            return {}
+        
+        # Filter files if path specified
+        files = commit_info.files
+        if file_path:
+            files = [f for f in files if f['filename'] == file_path]
+        
+        # Combine all patches into full diff
+        full_patch = ""
+        for file in files:
+            if file.get('patch'):
+                full_patch += f"\n--- {file['filename']} ---\n"
+                full_patch += file['patch']
+                full_patch += "\n"
+        
+        # Parse changed items for Ninox-specific structure
+        changed_items = self._parse_ninox_changes(files)
+        
+        return {
+            'commit': commit_info,
+            'files': files,
+            'full_patch': full_patch.strip(),
+            'changed_items': changed_items,
+        }
+    
+    def _parse_ninox_changes(self, files: List[Dict]) -> List[Dict]:
+        """
+        Parst Dateiänderungen und extrahiert Ninox-spezifische Informationen
+        
+        Args:
+            files: Liste der geänderten Dateien
+        
+        Returns:
+            Liste von geänderten Items mit Ninox-Kontext:
+            [
+                {
+                    'table': 'Rechnungen',
+                    'field': 'Summe',
+                    'code_type': 'fn',
+                    'change_type': 'modified',
+                    'additions': 5,
+                    'deletions': 2
+                }
+            ]
+        """
+        changed_items = []
+        
+        for file in files:
+            filename = file.get('filename', '')
+            
+            # Parse Ninox code file paths
+            # Expected format: databases/TeamName/DatabaseName/code/TableName/FieldName_codetype.nxs
+            # or: databases/TeamName/DatabaseName/structure.json
+            
+            parts = filename.split('/')
+            
+            if 'code' in parts:
+                # Code file
+                code_idx = parts.index('code')
+                if len(parts) > code_idx + 2:
+                    table_name = parts[code_idx + 1]
+                    field_file = parts[code_idx + 2] if len(parts) > code_idx + 2 else ''
+                    
+                    # Parse field_codetype.nxs
+                    if field_file.endswith('.nxs'):
+                        field_parts = field_file[:-4].rsplit('_', 1)
+                        field_name = field_parts[0] if field_parts else field_file[:-4]
+                        code_type = field_parts[1] if len(field_parts) > 1 else 'code'
+                    else:
+                        field_name = field_file
+                        code_type = 'unknown'
+                    
+                    changed_items.append({
+                        'table': table_name,
+                        'field': field_name,
+                        'code_type': code_type,
+                        'change_type': file.get('status', 'modified'),
+                        'additions': file.get('additions', 0),
+                        'deletions': file.get('deletions', 0),
+                        'filename': filename,
+                    })
+            
+            elif filename.endswith('structure.json'):
+                # Structure file changed
+                changed_items.append({
+                    'table': '[Schema]',
+                    'field': 'structure',
+                    'code_type': 'schema',
+                    'change_type': file.get('status', 'modified'),
+                    'additions': file.get('additions', 0),
+                    'deletions': file.get('deletions', 0),
+                    'filename': filename,
+                })
+            
+            elif filename.endswith('complete-backup.json'):
+                # Complete backup changed
+                changed_items.append({
+                    'table': '[Backup]',
+                    'field': 'complete-backup',
+                    'code_type': 'backup',
+                    'change_type': file.get('status', 'modified'),
+                    'additions': file.get('additions', 0),
+                    'deletions': file.get('deletions', 0),
+                    'filename': filename,
+                })
+        
+        return changed_items
