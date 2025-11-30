@@ -40,18 +40,34 @@ class NavHeader:
                     ui.badge('Admin', color='orange').classes('ml-2')
 
             with ui.row().classes('items-center gap-4'):
-                # Navigation links
+                # Dashboard (kein Dropdown)
                 self._nav_link('Dashboard', '/dashboard', 'dashboard')
-                self._nav_link('Servers', '/servers', 'storage')
-                self._nav_link('Teams', '/teams', 'group')
-                self._nav_link('Sync', '/sync', 'sync')
-                self._nav_link('Changes', '/changes', 'history')
-                self._nav_link('JSON', '/json-viewer', 'data_object')
-                self._nav_link('Code', '/code-viewer', 'code')
-                self._nav_link('Cronjobs', '/cronjobs', 'schedule')
-
+                
+                # Ninox Dropdown
+                self._nav_dropdown('Ninox', 'cloud', [
+                    ('Servers', '/servers', 'storage'),
+                    ('Teams', '/teams', 'group'),
+                    ('Sync', '/sync', 'sync'),
+                ], ['servers', 'teams', 'sync'])
+                
+                # Entwicklung Dropdown
+                self._nav_dropdown('Entwicklung', 'code', [
+                    ('Code', '/code-viewer', 'code'),
+                    ('JSON', '/json-viewer', 'data_object'),
+                    ('Änderungen', '/changes', 'history'),
+                ], ['code-viewer', 'json-viewer', 'changes'])
+                
+                # Einstellungen Dropdown (mit Cronjobs und Admin)
+                settings_items = [
+                    ('Cronjobs', '/cronjobs', 'schedule'),
+                ]
+                settings_pages = ['cronjobs']
+                
                 if self.user.is_admin:
-                    self._nav_link('Admin', '/admin', 'admin_panel_settings')
+                    settings_items.append(('Admin', '/admin', 'admin_panel_settings'))
+                    settings_pages.append('admin')
+                
+                self._nav_dropdown('', 'settings', settings_items, settings_pages, icon_only=True)
 
                 # User menu
                 with ui.button(icon='account_circle', color='white').props('flat'):
@@ -61,8 +77,8 @@ class NavHeader:
                             on_click=lambda: None
                         ).props('disable')
                         ui.separator()
-                        ui.menu_item('Profile', on_click=lambda: ui.navigate.to('/profile'))
-                        ui.menu_item('Logout', on_click=lambda: ui.navigate.to('/logout'))
+                        ui.menu_item('Profil', on_click=lambda: ui.navigate.to('/profile'))
+                        ui.menu_item('Abmelden', on_click=lambda: ui.navigate.to('/logout'))
 
     def _nav_link(self, label: str, path: str, icon: str):
         """Create a navigation link"""
@@ -77,6 +93,43 @@ class NavHeader:
             btn.classes('bg-white bg-opacity-20')
         else:
             btn.classes('text-white')
+    
+    def _nav_dropdown(self, label: str, icon: str, items: list, active_pages: list, icon_only: bool = False):
+        """Create a navigation dropdown menu"""
+        # Check if any sub-item is active
+        is_active = self.current_page in active_pages
+        
+        # Create button with dropdown
+        if icon_only:
+            btn = ui.button(icon=icon, color='white').props('flat')
+        else:
+            btn = ui.button(label, icon=icon, color='white').props('flat')
+        
+        if is_active:
+            btn.classes('bg-white bg-opacity-20')
+        else:
+            btn.classes('text-white')
+        
+        with btn:
+            with ui.menu().classes('bg-white'):
+                for item_label, item_path, item_icon in items:
+                    item_active = self.current_page == item_path.strip('/').replace('-', '-')
+                    # Check various formats of current_page
+                    page_id = item_path.strip('/').replace('-viewer', '').replace('-', '')
+                    is_item_active = (
+                        self.current_page == item_path.strip('/') or
+                        self.current_page == page_id or
+                        self.current_page == item_label.lower()
+                    )
+                    
+                    with ui.menu_item(on_click=lambda p=item_path: ui.navigate.to(p)):
+                        with ui.row().classes('items-center gap-2'):
+                            ui.icon(item_icon, size='sm').classes(
+                                'text-primary' if is_item_active else 'text-grey-7'
+                            )
+                            ui.label(item_label).classes(
+                                'font-bold' if is_item_active else ''
+                            )
 
 
 class Card:
