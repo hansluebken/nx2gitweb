@@ -10,6 +10,9 @@ Eine professionelle Webanwendung zur Synchronisation von Ninox-Datenbanken mit G
 - **GitHub-Integration**: Automatische Versionierung in privaten GitHub-Repositories
 - **Benutzerverwaltung**: Multi-User-System mit Admin- und Benutzerrollen
 - **Verschlüsselte Credentials**: Sichere Speicherung von API-Keys und Tokens
+- **KI-gestützte Changelogs**: Automatische Beschreibung von Änderungen (Claude, OpenAI, Gemini)
+- **Code-Viewer**: Hierarchische Ansicht aller Ninox-Codefelder mit Syntax-Highlighting
+- **Änderungshistorie**: Vollständige Nachverfolgbarkeit aller Datenbankänderungen
 
 ### Sicherheit
 - **JWT-Token-Authentifizierung**: Sichere, zustandslose Authentifizierung
@@ -57,7 +60,15 @@ webapp/
 │   │   ├── team.py
 │   │   ├── database.py
 │   │   ├── audit_log.py
-│   │   └── password_reset.py
+│   │   ├── password_reset.py
+│   │   ├── ai_config.py       # KI-Provider Konfiguration
+│   │   └── changelog.py       # Änderungsprotokoll
+│   ├── services/              # Business-Logik Services
+│   │   ├── ai_changelog.py    # KI-gestützte Changelog-Generierung
+│   │   └── cronjob_scheduler.py
+│   ├── migrations/            # Datenbank-Migrationen
+│   │   ├── migrate_add_ai_and_changelog.py
+│   │   └── migrate_add_ai_tokens.py
 │   ├── ui/                    # UI-Komponenten
 │   │   ├── components.py      # Wiederverwendbare Komponenten
 │   │   ├── login.py           # Login-Seite
@@ -65,18 +76,23 @@ webapp/
 │   │   ├── servers.py         # Server-Verwaltung
 │   │   ├── teams.py           # Team-Management
 │   │   ├── sync.py            # Synchronisation
-│   │   └── admin.py           # Admin-Panel
+│   │   ├── admin.py           # Admin-Panel (inkl. KI-Konfiguration)
+│   │   ├── changes.py         # Änderungshistorie
+│   │   ├── code_viewer.py     # Ninox Code-Viewer
+│   │   └── database_timeline.py  # Timeline-Dialog
 │   ├── api/                   # API-Clients
 │   │   ├── ninox_client.py
 │   │   └── github_manager.py
 │   └── utils/                 # Hilfsfunktionen
 │       ├── encryption.py
 │       ├── helpers.py
-│       └── validators.py
+│       ├── validators.py
+│       └── ninox_code_extractor.py
 └── data/                      # Persistente Daten (Volumes)
     ├── database/              # PostgreSQL-Daten
     ├── keys/                  # Verschlüsselungsschlüssel
-    └── logs/                  # Anwendungs-Logs
+    ├── logs/                  # Anwendungs-Logs
+    └── code/                  # Extrahierte Ninox-Code-Dateien
 ```
 
 ## ⚠️ Wichtige Hinweise
@@ -98,13 +114,29 @@ Siehe [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) für detaillierte Lösu
 ### Voraussetzungen
 
 - Docker und Docker Compose installiert
-- NGINX Proxy Manager mit `proxy-network` konfiguriert
-- Domain: `nx2git.netz-fabrik.net` (oder eigene Domain)
+- NGINX Proxy Manager (optional, für SSL/HTTPS)
+- Domain (optional): `nx2git.netz-fabrik.net` oder eigene Domain
+
+### Proxy-Network erstellen (falls NGINX Proxy Manager verwendet wird)
+
+```bash
+# Prüfen ob das Netzwerk existiert
+docker network ls | grep proxy-network
+
+# Falls nicht, erstellen:
+docker network create proxy-network
+```
 
 ### Schritt 1: Repository klonen
 
 ```bash
-cd /home/nx2git-go/webapp
+# Repository klonen
+git clone https://github.com/hansluebken/nx2gitweb.git
+cd nx2gitweb
+
+# Oder in ein spezifisches Verzeichnis
+git clone https://github.com/hansluebken/nx2gitweb.git /home/nx2git/webapp
+cd /home/nx2git/webapp
 ```
 
 ### Schritt 2: Umgebungsvariablen konfigurieren
@@ -145,16 +177,34 @@ Der Verschlüsselungsschlüssel wird automatisch beim ersten Start generiert.
 ### Schritt 4: Docker Container starten
 
 ```bash
+# Container bauen und starten
+docker-compose up -d --build
+
+# Alternativ bei Updates:
+docker-compose build --no-cache
 docker-compose up -d
 ```
 
-### Schritt 5: Logs überprüfen
+### Schritt 5: Datenbank-Migrationen ausführen
+
+Bei der ersten Installation werden die Tabellen automatisch erstellt.
+Nach Updates mit neuen Features ggf. Migrationen ausführen:
+
+```bash
+# KI-Konfiguration und Changelog-Tabellen
+docker-compose exec webapp python -m app.migrations.migrate_add_ai_and_changelog
+
+# Token-Tracking (falls noch nicht vorhanden)
+docker-compose exec webapp python -m app.migrations.migrate_add_ai_tokens
+```
+
+### Schritt 6: Logs überprüfen
 
 ```bash
 docker-compose logs -f webapp
 ```
 
-### Schritt 6: NGINX Proxy Manager konfigurieren
+### Schritt 7: NGINX Proxy Manager konfigurieren
 
 1. In NGINX Proxy Manager einloggen
 2. Neuen Proxy Host erstellen:
@@ -165,7 +215,7 @@ docker-compose logs -f webapp
    - **SSL**: Let's Encrypt aktivieren
    - **Force SSL**: Ja
 
-### Schritt 7: Erste Anmeldung
+### Schritt 8: Erste Anmeldung
 
 1. Öffnen Sie `https://nx2git.netz-fabrik.net`
 2. Melden Sie sich mit dem Admin-Account an:
@@ -370,7 +420,27 @@ Bei Fragen oder Problemen:
 
 Proprietär - Alle Rechte vorbehalten
 
+### KI-Konfiguration (optional)
+
+Für automatische Changelog-Beschreibungen einen KI-Provider konfigurieren:
+
+1. Navigieren Sie zu **Admin** → **KI-Konfiguration**
+2. Wählen Sie einen Provider (Claude, OpenAI oder Gemini)
+3. Geben Sie den API-Key ein
+4. Testen Sie die Verbindung
+5. Setzen Sie den Provider als Standard
+
+Die Token-Nutzung wird automatisch getrackt und in der UI angezeigt.
+
 ## Changelog
+
+### Version 1.1.0 (2025-11-30)
+- KI-gestützte Changelog-Generierung (Claude, OpenAI, Gemini)
+- Token-Tracking für Kostenüberwachung
+- Neue Seite "Änderungen" mit Filter und Suche
+- Database Timeline Dialog mit KI-Zusammenfassungen
+- Erweiterter Code-Viewer mit Änderungshistorie
+- Admin-Panel mit KI-Provider Konfiguration
 
 ### Version 1.0.0 (2025-01-09)
 - Initiale Release

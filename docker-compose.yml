@@ -23,8 +23,8 @@ services:
     env_file:
       - .env
     environment:
-      # Database - explicitly override to ensure correct value
-      DATABASE_URL: postgresql://nx2git:nx2gitSecurePassword2024@nx2git-postgres:5432/nx2git
+      # Database - use environment variables
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nx2git}:${POSTGRES_PASSWORD}@nx2git-postgres:5432/${POSTGRES_DB:-nx2git}
 
       # Security
       SECRET_KEY: ${SECRET_KEY}
