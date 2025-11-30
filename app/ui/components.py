@@ -55,7 +55,8 @@ class NavHeader:
                     ('Code', '/code-viewer', 'code'),
                     ('JSON', '/json-viewer', 'data_object'),
                     ('Änderungen', '/changes', 'history'),
-                ], ['code-viewer', 'json-viewer', 'changes'])
+                    ('Chat', '/chat', 'chat'),
+                ], ['code-viewer', 'json-viewer', 'changes', 'chat'])
                 
                 # Einstellungen Dropdown (mit Cronjobs und Admin)
                 settings_items = [
@@ -99,14 +100,17 @@ class NavHeader:
         # Check if any sub-item is active
         is_active = self.current_page in active_pages
         
-        # Create button with dropdown - use style for reliable white text
+        # Create button with dropdown
         if icon_only:
-            btn = ui.button(icon=icon).props('flat').style('color: white !important;')
+            btn = ui.button(icon=icon).props('flat')
         else:
-            btn = ui.button(label, icon=icon).props('flat').style('color: white !important;')
+            btn = ui.button(label, icon=icon).props('flat')
         
+        # Same styling as _nav_link: white background when active, white text otherwise
         if is_active:
             btn.classes('bg-white bg-opacity-20')
+        else:
+            btn.classes('text-white')
         
         with btn:
             with ui.menu().classes('bg-white'):

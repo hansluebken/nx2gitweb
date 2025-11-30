@@ -1370,7 +1370,7 @@ def show_documentation_dialog(user, server, team, database):
     from ..services.doc_generator import DocumentationGenerator, get_documentation_generator
     from ..models.documentation import Documentation
     from ..models.ai_config import AIConfig, AIProvider
-    from ..utils.encryption import decrypt_value
+    # decrypt_value nicht benötigt - wird über get_encryption_manager() gemacht
     from ..utils.github_utils import get_repo_name_from_server
     
     logger = logging.getLogger(__name__)
@@ -1423,7 +1423,8 @@ def show_documentation_dialog(user, server, team, database):
                 ).classes('text-grey-7')
                 
                 with ui.row().classes('items-center gap-4 mt-2'):
-                    ui.label(f'Modell: gemini-2.5-pro').classes('text-sm text-grey-6')
+                    ui.label(f'Modell: {gemini_config.model}').classes('text-sm text-grey-6')
+                    ui.label(f'Max Tokens: Maximum').classes('text-sm text-grey-6')
                     if latest_doc:
                         ui.label(f'Letzte Generierung: {latest_doc.generated_at.strftime("%d.%m.%Y %H:%M")}').classes('text-sm text-grey-6')
             

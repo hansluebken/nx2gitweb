@@ -75,17 +75,25 @@ class DocumentationResult:
 class DocumentationGenerator:
     """Generates application documentation from Ninox database structure"""
     
-    # Use the latest Gemini model
-    MODEL = "gemini-2.5-pro"
+    # Default values (can be overridden by config)
+    DEFAULT_MODEL = "gemini-2.5-pro"
+    DEFAULT_MAX_TOKENS = 1000000  # Request maximum - Gemini will use what it can
+    DEFAULT_TEMPERATURE = 0.3
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str = None, max_tokens: int = None, temperature: float = None):
         """
         Initialize the documentation generator
         
         Args:
             api_key: Google Gemini API key
+            model: Gemini model to use (from config)
+            max_tokens: Maximum output tokens (from config)
+            temperature: Temperature setting (from config)
         """
         self.api_key = api_key
+        self.model = model or self.DEFAULT_MODEL
+        self.max_tokens = max_tokens or self.DEFAULT_MAX_TOKENS
+        self.temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
     
     def generate(self, structure_json: Dict[str, Any], db_name: str) -> DocumentationResult:
         """
@@ -103,7 +111,7 @@ class DocumentationGenerator:
             
             # Configure Gemini
             genai.configure(api_key=self.api_key)
-            model = genai.GenerativeModel(self.MODEL)
+            model = genai.GenerativeModel(self.model)
             
             # Prepare the structure JSON
             structure_str = json.dumps(structure_json, indent=2, ensure_ascii=False)
@@ -111,14 +119,14 @@ class DocumentationGenerator:
             # Build the full prompt
             full_prompt = f"{DOCUMENTATION_PROMPT}\n\n```json\n{structure_str}\n```"
             
-            logger.info(f"Generating documentation for '{db_name}' using {self.MODEL}")
+            logger.info(f"Generating documentation for '{db_name}' using {self.model} (max_tokens={self.max_tokens}, temp={self.temperature})")
             
-            # Generate content
+            # Generate content with configured parameters
             response = model.generate_content(
                 full_prompt,
                 generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=8000,  # Allow long documentation
-                    temperature=0.3,  # More focused output
+                    max_output_tokens=self.max_tokens,
+                    temperature=self.temperature,
                 )
             )
             
@@ -136,7 +144,8 @@ class DocumentationGenerator:
             header = f"""# {db_name} - Anwendungsdokumentation
 
 > **Automatisch generiert am:** {datetime.now().strftime('%d.%m.%Y um %H:%M Uhr')}  
-> **KI-Modell:** {self.MODEL}  
+> **KI-Modell:** {self.model}  
+> **Max Tokens:** {self.max_tokens}  
 > **Token-Verbrauch:** {input_tokens or '?'} Input / {output_tokens or '?'} Output
 
 ---
@@ -151,7 +160,7 @@ class DocumentationGenerator:
                 success=True,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
-                model=self.MODEL,
+                model=self.model,
                 generated_at=datetime.now()
             )
             
@@ -161,7 +170,7 @@ class DocumentationGenerator:
                 content="",
                 success=False,
                 error=str(e),
-                model=self.MODEL
+                model=self.model
             )
     
     @staticmethod
@@ -213,7 +222,8 @@ class DocumentationGenerator:
 
 def get_documentation_generator() -> Optional[DocumentationGenerator]:
     """
-    Get a DocumentationGenerator instance if Gemini is configured
+    Get a DocumentationGenerator instance if Gemini is configured.
+    Uses the model, max_tokens, and temperature from Admin KI-Konfiguration.
     
     Returns:
         DocumentationGenerator or None if not configured
@@ -221,7 +231,7 @@ def get_documentation_generator() -> Optional[DocumentationGenerator]:
     try:
         from ..database import get_db
         from ..models.ai_config import AIConfig, AIProvider
-        from ..utils.encryption import decrypt_value
+        from ..utils.encryption import get_encryption_manager
         
         db = get_db()
         try:
@@ -235,13 +245,25 @@ def get_documentation_generator() -> Optional[DocumentationGenerator]:
                 logger.warning("Gemini not configured for documentation generation")
                 return None
             
-            # Decrypt API key
-            api_key = decrypt_value(config.api_key_encrypted)
+            # Decrypt API key using EncryptionManager
+            enc_manager = get_encryption_manager()
+            api_key = enc_manager.decrypt(config.api_key_encrypted)
             if not api_key:
                 logger.warning("Could not decrypt Gemini API key")
                 return None
             
-            return DocumentationGenerator(api_key=api_key)
+            # Use configuration from Admin panel
+            # For documentation we request maximum tokens - Gemini will use what it supports
+            doc_max_tokens = 1000000  # Request max - model will limit automatically
+            
+            logger.info(f"Creating DocumentationGenerator with model={config.model}, max_tokens={doc_max_tokens}, temp={config.temperature}")
+            
+            return DocumentationGenerator(
+                api_key=api_key,
+                model=config.model,
+                max_tokens=doc_max_tokens,
+                temperature=config.temperature
+            )
             
         finally:
             db.close()
