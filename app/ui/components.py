@@ -51,7 +51,7 @@ class NavHeader:
                 ], ['servers', 'teams', 'sync'])
                 
                 # Entwicklung Dropdown
-                self._nav_dropdown('Entwicklung', 'code', [
+                self._nav_dropdown('Entwicklung', 'developer_mode', [
                     ('Code', '/code-viewer', 'code'),
                     ('JSON', '/json-viewer', 'data_object'),
                     ('Änderungen', '/changes', 'history'),
@@ -99,16 +99,14 @@ class NavHeader:
         # Check if any sub-item is active
         is_active = self.current_page in active_pages
         
-        # Create button with dropdown - no color prop, use classes for styling
+        # Create button with dropdown - use style for reliable white text
         if icon_only:
-            btn = ui.button(icon=icon).props('flat')
+            btn = ui.button(icon=icon).props('flat').style('color: white !important;')
         else:
-            btn = ui.button(label, icon=icon).props('flat')
+            btn = ui.button(label, icon=icon).props('flat').style('color: white !important;')
         
         if is_active:
-            btn.classes('text-white bg-white bg-opacity-20')
-        else:
-            btn.classes('text-white')
+            btn.classes('bg-white bg-opacity-20')
         
         with btn:
             with ui.menu().classes('bg-white'):
