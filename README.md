@@ -13,9 +13,13 @@ Eine professionelle Webanwendung zur Synchronisation von Ninox-Datenbanken mit G
 - **KI-gestützte Changelogs**: Automatische Beschreibung von Änderungen (Claude, OpenAI, Gemini)
 - **Code-Viewer**: Hierarchische Ansicht aller Ninox-Codefelder mit Syntax-Highlighting
 - **Änderungshistorie**: Vollständige Nachverfolgbarkeit aller Datenbankänderungen
+- **Google OAuth2 Login**: Single Sign-On mit Google Workspace
+- **Google Drive Export**: JSON-Daten als Google Docs in Shared Drives speichern
 
 ### Sicherheit
 - **JWT-Token-Authentifizierung**: Sichere, zustandslose Authentifizierung
+- **Google OAuth2**: Single Sign-On mit Google Workspace
+- **Domain-basierte Zugriffskontrolle**: Nur bestimmte E-Mail-Domains erlauben
 - **Bcrypt-Passwort-Hashing**: Industrie-Standard für Passwort-Sicherheit
 - **Fernet-Verschlüsselung**: Verschlüsselte Speicherung von API-Keys und GitHub-Tokens
 - **Audit-Logging**: Vollständige Nachverfolgbarkeit aller Benutzeraktionen
@@ -196,6 +200,15 @@ docker-compose exec webapp python -m app.migrations.migrate_add_ai_and_changelog
 
 # Token-Tracking (falls noch nicht vorhanden)
 docker-compose exec webapp python -m app.migrations.migrate_add_ai_tokens
+
+# Dokumentations-Feature
+docker-compose exec webapp python -m app.migrations.migrate_add_documentation
+
+# Google OAuth2 (v1.2.0+)
+docker-compose exec webapp python -m app.migrations.migrate_add_oauth
+
+# Google Drive Integration (v1.2.0+)
+docker-compose exec webapp python -m app.migrations.migrate_add_drive
 ```
 
 ### Schritt 6: Logs überprüfen
@@ -511,6 +524,26 @@ Bei Fragen oder Problemen:
 
 Proprietär - Alle Rechte vorbehalten
 
+### Google OAuth und Drive Integration (optional)
+
+Für Google Workspace Single Sign-On und Google Drive Upload:
+
+1. Navigieren Sie zu **Admin** → **OAuth**
+2. Klicken Sie auf "Schritt-für-Schritt Anleitung" für detaillierte Einrichtung
+3. Erstellen Sie OAuth 2.0 Credentials in der Google Cloud Console
+4. Tragen Sie Client ID und Client Secret ein
+5. Optional: Erlaubte Domains für automatische Benutzeranlage konfigurieren
+6. Optional: Drive-Upload aktivieren für JSON → Google Docs Export
+
+**Migrations ausführen (falls von älterer Version aktualisiert):**
+```bash
+# OAuth-Tabellen erstellen
+docker-compose exec webapp python -m app.migrations.migrate_add_oauth
+
+# Drive-Felder hinzufügen
+docker-compose exec webapp python -m app.migrations.migrate_add_drive
+```
+
 ### KI-Konfiguration (optional)
 
 Für automatische Changelog-Beschreibungen einen KI-Provider konfigurieren:
@@ -524,6 +557,13 @@ Für automatische Changelog-Beschreibungen einen KI-Provider konfigurieren:
 Die Token-Nutzung wird automatisch getrackt und in der UI angezeigt.
 
 ## Changelog
+
+### Version 1.2.0 (2025-11-30)
+- Google Workspace OAuth2 Login (Single Sign-On)
+- Google Drive Integration (JSON als Google Docs exportieren)
+- Domain-basierte Zugriffskontrolle für OAuth
+- Automatische Benutzeranlage bei erlaubten Domains
+- Detaillierte Schritt-für-Schritt Dokumentation im Admin-Panel
 
 ### Version 1.1.0 (2025-11-30)
 - KI-gestützte Changelog-Generierung (Claude, OpenAI, Gemini)
