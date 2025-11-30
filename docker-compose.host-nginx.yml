@@ -1,3 +1,13 @@
+# Docker Compose für Host-installiertes NGINX
+# 
+# Verwendung:
+#   docker-compose -f docker-compose.host-nginx.yml up -d --build
+#
+# Diese Konfiguration:
+# - Bindet Port 8765 nur an localhost (127.0.0.1)
+# - Kein externes proxy-network erforderlich
+# - NGINX auf dem Host leitet Anfragen weiter
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -23,7 +33,7 @@ services:
     env_file:
       - .env
     environment:
-      # Database - use environment variables
+      # Database
       DATABASE_URL: postgresql://${POSTGRES_USER:-nx2git}:${POSTGRES_PASSWORD}@nx2git-postgres:5432/${POSTGRES_DB:-nx2git}
 
       # Security
@@ -44,7 +54,7 @@ services:
 
       # Application
       APP_NAME: Ninox2Git WebApp
-      APP_URL: https://nx2git.netz-fabrik.net
+      APP_URL: ${APP_URL:-https://nx2git.example.com}
       APP_HOST: 0.0.0.0
       APP_PORT: 8765
       ADMIN_EMAIL: ${ADMIN_EMAIL}
@@ -54,47 +64,22 @@ services:
       SESSION_SECRET: ${SECRET_KEY}
 
     volumes:
-      - ./app:/app/app  # Mount app code for live updates
+      - ./app:/app/app
       - ./data/keys:/app/data/keys
       - ./data/logs:/app/data/logs
-      - ./data/code:/app/data/code  # Ninox code files (persistent)
-    # ============================================
-    # PORT CONFIGURATION - Choose ONE option:
-    # ============================================
-    # 
-    # Option A: NGINX Proxy Manager (default)
-    #   - Keep ports commented out
-    #   - Use proxy-network (see networks below)
-    #
-    # Option B: Host-installed NGINX
-    #   - Uncomment: - "127.0.0.1:8765:8765"
-    #   - Comment out proxy-network in networks
-    #
-    # Option C: Direct access (testing only)
-    #   - Uncomment: - "8765:8765"
-    #
-    # ports:
-    #   - "127.0.0.1:8765:8765"  # Option B: Host NGINX (localhost only)
-    #   - "8765:8765"            # Option C: Direct access (no proxy)
+      - ./data/code:/app/data/code
+    
+    # Port nur an localhost binden - NGINX auf Host leitet weiter
+    ports:
+      - "127.0.0.1:8765:8765"
     
     networks:
       - nx2git-internal
-      - proxy-network  # Comment out for Option B/C
     depends_on:
       postgres:
         condition: service_healthy
-    labels:
-      # Labels für NGINX Proxy Manager (Option A)
-      - "com.nginx-proxy.enable=true"
-      - "com.nginx-proxy.host=nx2git.netz-fabrik.net"
-      - "com.nginx-proxy.port=8765"
     restart: unless-stopped
 
 networks:
   nx2git-internal:
     driver: bridge
-  # Für Option A (NGINX Proxy Manager): 
-  # Das proxy-network muss existieren: docker network create proxy-network
-  # Für Option B/C: Diese Zeilen auskommentieren oder entfernen
-  proxy-network:
-    external: true

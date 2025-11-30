@@ -204,16 +204,131 @@ docker-compose exec webapp python -m app.migrations.migrate_add_ai_tokens
 docker-compose logs -f webapp
 ```
 
-### Schritt 7: NGINX Proxy Manager konfigurieren
+### Schritt 7: Reverse Proxy konfigurieren
+
+Wählen Sie **eine** der folgenden Optionen:
+
+---
+
+#### Option A: NGINX Proxy Manager (Docker-basiert)
+
+Für diese Option muss das `proxy-network` existieren (siehe Voraussetzungen).
 
 1. In NGINX Proxy Manager einloggen
 2. Neuen Proxy Host erstellen:
-   - **Domain Names**: `nx2git.netz-fabrik.net`
+   - **Domain Names**: `nx2git.ihre-domain.de`
    - **Scheme**: `http`
-   - **Forward Hostname/IP**: `nx2git-webapp` (Container-Name)
+   - **Forward Hostname/IP**: `nx2git-webapp` (Container-Name!)
    - **Forward Port**: `8765`
+   - **Websockets Support**: ✅ Aktivieren (wichtig für NiceGUI!)
    - **SSL**: Let's Encrypt aktivieren
    - **Force SSL**: Ja
+
+**Wichtig**: Der Forward Hostname muss `nx2git-webapp` sein, NICHT `localhost` oder `127.0.0.1`!
+
+---
+
+#### Option B: NGINX auf dem Host installiert
+
+Falls Sie NGINX direkt auf dem Host installiert haben (nicht als Docker-Container):
+
+1. **Port freigeben** - Bearbeiten Sie `docker-compose.yml`:
+
+```yaml
+webapp:
+  # ... andere Konfiguration ...
+  ports:
+    - "127.0.0.1:8765:8765"  # Nur lokal erreichbar
+```
+
+2. **NGINX Konfiguration erstellen**:
+
+```bash
+sudo nano /etc/nginx/sites-available/nx2git
+```
+
+```nginx
+server {
+    listen 80;
+    server_name nx2git.ihre-domain.de;
+    
+    # Redirect to HTTPS
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name nx2git.ihre-domain.de;
+
+    # SSL Zertifikate (Let's Encrypt)
+    ssl_certificate /etc/letsencrypt/live/nx2git.ihre-domain.de/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/nx2git.ihre-domain.de/privkey.pem;
+    
+    # SSL Einstellungen
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+    ssl_prefer_server_ciphers off;
+
+    # Proxy zu NiceGUI
+    location / {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        
+        # WebSocket Support (wichtig für NiceGUI!)
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Header
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # Timeouts für WebSockets
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+    }
+}
+```
+
+3. **Konfiguration aktivieren**:
+
+```bash
+# Symlink erstellen
+sudo ln -s /etc/nginx/sites-available/nx2git /etc/nginx/sites-enabled/
+
+# Konfiguration testen
+sudo nginx -t
+
+# NGINX neu laden
+sudo systemctl reload nginx
+```
+
+4. **SSL-Zertifikat erstellen** (falls noch nicht vorhanden):
+
+```bash
+sudo certbot --nginx -d nx2git.ihre-domain.de
+```
+
+---
+
+#### Option C: Direkter Zugriff (nur für Tests)
+
+Für lokale Tests ohne Reverse Proxy:
+
+1. **Port freigeben** in `docker-compose.yml`:
+
+```yaml
+webapp:
+  ports:
+    - "8765:8765"  # Öffentlich erreichbar
+```
+
+2. Zugriff über `http://server-ip:8765`
+
+**Hinweis**: Nicht für Produktion empfohlen (kein HTTPS)!
+
+---
 
 ### Schritt 8: Erste Anmeldung
 
