@@ -111,8 +111,10 @@ def generate_markdown_from_backup(backup_data: Dict[str, Any], database_name: st
     if db_context["ext_dbs"]:
         lines.append("### Externe Datenbanken")
         lines.append("")
+        lines.append("| Name | Datenbank-ID |")
+        lines.append("| :--- | :--- |")
         for db_id, db_name in db_context["ext_dbs"].items():
-            lines.append(f"- `{db_id}`: {db_name}")
+            lines.append(f"| {db_name} | `{db_id}` |")
         lines.append("")
     
     # Schema overview
@@ -339,7 +341,7 @@ def _get_relation_info(field_data: Dict[str, Any], table_map: Dict[str, str],
     ext_id = field_data.get("dbId", "")
     if ext_id:
         db_name = ext_db_map.get(ext_id, ext_id)
-        return f"🔗 **EXTERN** [{cardinality}] → {target_str} in DB `{db_name}`"
+        return f"🔗 **EXTERN** [{cardinality}] → {target_str} in DB `{db_name}` (ID: `{ext_id}`)"
     
     # Build relation type string
     if base == "ref":
