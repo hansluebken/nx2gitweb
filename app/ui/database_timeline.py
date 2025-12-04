@@ -158,7 +158,7 @@ def render_timeline_entry(changelog: ChangeLog, is_last: bool = False):
                     background-color: {dot_color};
                     margin: 8px 0;
                 "></div>
-            ''')
+            ''', sanitize=False)
             
             # Vertical line (if not last)
             if not is_last:
@@ -169,7 +169,7 @@ def render_timeline_entry(changelog: ChangeLog, is_last: bool = False):
                         background-color: #e0e0e0;
                         min-height: 40px;
                     "></div>
-                ''')
+                ''', sanitize=False)
         
         # Right side: Content card
         with ui.card().classes('flex-1 p-3 mb-2').style('background-color: #fafafa;'):

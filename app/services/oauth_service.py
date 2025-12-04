@@ -26,11 +26,13 @@ GOOGLE_SCOPES_BASIC = [
 ]
 
 # Extended scopes including Drive access
+# Note: drive.file only allows access to files created by the app
+# For Shared Drives access, we need the full drive scope
 GOOGLE_SCOPES_WITH_DRIVE = [
     "openid",
     "email",
     "profile",
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/documents",
 ]
 

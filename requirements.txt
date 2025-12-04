@@ -1,7 +1,9 @@
 # Ninox2Git WebApp Dependencies
 
 # Web Framework
-nicegui>=1.4.0
+nicegui>=3.0.0
+# Pin FastAPI to avoid coroutine serialization bug (see https://github.com/zauberzeug/nicegui/issues/5535)
+fastapi>=0.109.1,<0.123.5
 
 # Database
 sqlalchemy>=2.0.0

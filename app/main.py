@@ -4,6 +4,7 @@ Main NiceGUI application entry point with authentication and routing
 """
 import os
 import logging
+import asyncio
 from typing import Optional
 from nicegui import app, ui
 from contextlib import asynccontextmanager
@@ -90,6 +91,7 @@ def index():
         ui.navigate.to('/dashboard')
     else:
         ui.navigate.to('/login')
+    return None
 
 
 @ui.page('/login')
@@ -98,9 +100,10 @@ def login_page():
     user = get_current_user()
     if user:
         ui.navigate.to('/dashboard')
-        return
+        return None
 
     login.render()
+    return None
 
 
 @ui.page('/dashboard')
@@ -108,22 +111,27 @@ def dashboard_page():
     """Main dashboard page"""
     # Check authentication BEFORE rendering anything
     token = app.storage.user.get(SESSION_TOKEN_KEY)
+    logger.debug(f"Dashboard access - token present: {bool(token)}, length: {len(token) if token else 0}")
+    
     if not token:
+        logger.warning("Dashboard access denied: no token in session - redirecting to login")
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
         user = get_user_from_token(db, token)
         db.close()
+        logger.debug(f"Dashboard access granted for user: {user.username if user else 'None'}")
     except Exception as e:
-        logger.error(f"Auth error: {e}")
+        logger.error(f"Auth error on dashboard: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     # Only render if we have a valid user
     dashboard.render(user)
+    return None
 
 
 @ui.page('/servers')
@@ -133,7 +141,7 @@ def servers_page():
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
@@ -143,9 +151,10 @@ def servers_page():
         logger.error(f"Auth error: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     servers.render(user)
+    return None
 
 
 @ui.page('/teams')
@@ -154,7 +163,7 @@ def teams_page():
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
@@ -164,9 +173,10 @@ def teams_page():
         logger.error(f"Auth error: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     teams.render(user)
+    return None
 
 
 @ui.page('/sync')
@@ -175,7 +185,7 @@ def sync_page():
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
@@ -185,9 +195,10 @@ def sync_page():
         logger.error(f"Auth error: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     sync.render(user)
+    return None
 
 
 @ui.page('/admin')
@@ -196,7 +207,7 @@ def admin_page():
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
@@ -207,14 +218,15 @@ def admin_page():
         if not user.is_admin:
             ui.notify('Admin privileges required', type='negative')
             ui.navigate.to('/dashboard')
-            return
+            return None
     except Exception as e:
         logger.error(f"Auth error: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     admin.render(user)
+    return None
 
 
 @ui.page('/profile')
@@ -223,7 +235,7 @@ def profile_page():
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
@@ -233,9 +245,10 @@ def profile_page():
         logger.error(f"Auth error: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     profile.render(user)
+    return None
 
 
 @ui.page('/cronjobs')
@@ -244,7 +257,7 @@ def cronjobs_page():
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
@@ -254,9 +267,10 @@ def cronjobs_page():
         logger.error(f"Auth error: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     cronjobs.render(user)
+    return None
 
 
 @ui.page('/json-viewer')
@@ -265,7 +279,7 @@ def json_viewer_page():
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
@@ -275,9 +289,10 @@ def json_viewer_page():
         logger.error(f"Auth error: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     json_viewer.render(user)
+    return None
 
 
 @ui.page('/code-viewer')
@@ -286,7 +301,7 @@ def code_viewer_page():
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
@@ -296,9 +311,10 @@ def code_viewer_page():
         logger.error(f"Auth error: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     code_viewer.render(user)
+    return None
 
 
 @ui.page('/changes')
@@ -307,7 +323,7 @@ def changes_page():
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
-        return
+        return None
 
     try:
         db = get_db()
@@ -317,9 +333,10 @@ def changes_page():
         logger.error(f"Auth error: {e}")
         app.storage.user.pop(SESSION_TOKEN_KEY, None)
         ui.navigate.to('/login')
-        return
+        return None
 
     changes.render(user)
+    return None
 
 
 # ============================================================================
@@ -327,16 +344,17 @@ def changes_page():
 # ============================================================================
 
 @ui.page('/auth/google')
-async def google_auth_start():
+def google_auth_start():
     """Start Google OAuth flow - redirects to Google"""
     from .services.oauth_service import get_oauth_service
     from .services.drive_service import is_drive_enabled
+    from starlette.responses import RedirectResponse
     
     oauth_service = get_oauth_service()
     if not oauth_service:
         ui.notify('Google OAuth ist nicht konfiguriert', type='negative')
         ui.navigate.to('/login')
-        return
+        return None
     
     # Check if Drive is enabled - if so, include Drive scopes
     include_drive = is_drive_enabled()
@@ -347,109 +365,118 @@ async def google_auth_start():
     # Store state in session for validation
     app.storage.user['oauth_state'] = state
     
-    # Redirect to Google
-    await ui.run_javascript(f'window.location.href = "{auth_url}"')
+    # Show loading message and redirect via meta refresh
+    with ui.column().classes('w-full h-screen items-center justify-center'):
+        ui.spinner(size='xl')
+        ui.label('Weiterleitung zu Google...').classes('text-h6 mt-4')
+        # Use HTML meta refresh as fallback
+        ui.html(f'<meta http-equiv="refresh" content="0;url={auth_url}">', sanitize=False)
+    return None
 
 
 @ui.page('/auth/google/callback')
-async def google_auth_callback():
-    """Handle Google OAuth callback"""
-    from .services.oauth_service import get_oauth_service, OAuthError
-    from .auth import login_or_create_oauth_user, OAuthDomainNotAllowedError, InactiveUserError
-    from nicegui import app as nicegui_app
-    
-    # Get query parameters
-    code = nicegui_app.storage.browser.get('code')
-    state = nicegui_app.storage.browser.get('state')
-    error = nicegui_app.storage.browser.get('error')
-    
-    # Check for errors from Google
-    if error:
-        logger.error(f"OAuth error from Google: {error}")
-        ui.notify(f'Google Anmeldung fehlgeschlagen: {error}', type='negative')
-        ui.navigate.to('/login')
-        return
-    
-    # Get code and state from URL using JavaScript
-    code_result = await ui.run_javascript('''
-        const params = new URLSearchParams(window.location.search);
-        return {code: params.get('code'), state: params.get('state'), error: params.get('error')};
-    ''')
-    
-    code = code_result.get('code') if code_result else None
-    state = code_result.get('state') if code_result else None
-    error = code_result.get('error') if code_result else None
-    
-    if error:
-        logger.error(f"OAuth error from Google: {error}")
-        ui.notify(f'Google Anmeldung fehlgeschlagen: {error}', type='negative')
-        ui.navigate.to('/login')
-        return
-    
-    if not code:
-        logger.error("No authorization code in callback")
-        ui.notify('Keine Autorisierung erhalten', type='negative')
-        ui.navigate.to('/login')
-        return
-    
-    # Validate state
-    oauth_service = get_oauth_service()
-    if not oauth_service:
-        ui.notify('Google OAuth ist nicht konfiguriert', type='negative')
-        ui.navigate.to('/login')
-        return
-    
-    stored_state = app.storage.user.get('oauth_state')
-    if state and stored_state and state != stored_state:
-        logger.error("OAuth state mismatch")
-        ui.notify('Sicherheitsfehler: State mismatch', type='negative')
-        ui.navigate.to('/login')
-        return
-    
-    # Clear stored state
-    app.storage.user.pop('oauth_state', None)
-    
-    try:
-        # Exchange code for user info
-        user_info = await oauth_service.authenticate(code)
+def google_auth_callback():
+    """Handle Google OAuth callback - shows processing page"""
+    # Show a processing page that will handle the OAuth callback via JavaScript
+    with ui.column().classes('w-full h-screen items-center justify-center'):
+        ui.spinner(size='xl')
+        ui.label('Anmeldung wird verarbeitet...').classes('text-h6 mt-4')
         
-        # Login or create user
-        db = get_db()
-        try:
-            user_dto, token = login_or_create_oauth_user(
-                db=db,
-                google_id=user_info.google_id,
-                email=user_info.email,
-                full_name=user_info.name,
-                avatar_url=user_info.picture,
-                refresh_token=user_info.refresh_token,  # For Drive API
-            )
+        # Process OAuth callback
+        async def process_oauth():
+            from .services.oauth_service import get_oauth_service, OAuthError
+            from .auth import login_or_create_oauth_user, OAuthDomainNotAllowedError, InactiveUserError
             
-            # Store token in session
-            app.storage.user[SESSION_TOKEN_KEY] = token
-            
-            ui.notify(f'Willkommen, {user_dto.full_name or user_dto.username}!', type='positive')
-            ui.navigate.to('/dashboard')
-            
-        finally:
-            db.close()
-            
-    except OAuthDomainNotAllowedError as e:
-        logger.warning(f"OAuth domain not allowed: {e}")
-        ui.notify(str(e), type='negative')
-        ui.navigate.to('/login')
-    except InactiveUserError as e:
-        logger.warning(f"OAuth inactive user: {e}")
-        ui.notify(str(e), type='negative')
-        ui.navigate.to('/login')
-    except OAuthError as e:
-        logger.error(f"OAuth error: {e}")
-        ui.notify(f'Anmeldung fehlgeschlagen: {str(e)}', type='negative')
-        ui.navigate.to('/login')
-    except Exception as e:
-        logger.error(f"Unexpected OAuth error: {e}")
-        ui.notify('Ein unerwarteter Fehler ist aufgetreten', type='negative')
-        ui.navigate.to('/login')
+            try:
+                # Get query params via JavaScript
+                result = await ui.run_javascript('''
+                    const params = new URLSearchParams(window.location.search);
+                    return {
+                        code: params.get('code'),
+                        state: params.get('state'),
+                        error: params.get('error')
+                    };
+                ''', timeout=5.0)
+                
+                code = result.get('code') if result else None
+                state = result.get('state') if result else None
+                error = result.get('error') if result else None
+                
+                logger.info(f"OAuth callback - code: {'yes' if code else 'no'}, state: {state[:8] if state else 'none'}...")
+                
+                if error:
+                    logger.error(f"OAuth error from Google: {error}")
+                    ui.notify(f'Google Anmeldung fehlgeschlagen: {error}', type='negative')
+                    ui.navigate.to('/login')
+                    return None
+                
+                if not code:
+                    logger.error("No authorization code in callback")
+                    ui.notify('Keine Autorisierung erhalten', type='negative')
+                    ui.navigate.to('/login')
+                    return None
+                
+                oauth_service = get_oauth_service()
+                if not oauth_service:
+                    ui.notify('Google OAuth ist nicht konfiguriert', type='negative')
+                    ui.navigate.to('/login')
+                    return None
+                
+                # Validate state
+                stored_state = app.storage.user.get('oauth_state')
+                if state and stored_state and state != stored_state:
+                    if not oauth_service.validate_state(state):
+                        logger.error("OAuth state mismatch")
+                        ui.notify('Sicherheitsfehler. Bitte erneut versuchen.', type='negative')
+                        ui.navigate.to('/login')
+                        return None
+                
+                app.storage.user.pop('oauth_state', None)
+                
+                # Exchange code for user info
+                user_info = await oauth_service.authenticate(code)
+                
+                # Login or create user
+                db = get_db()
+                try:
+                    user_dto, token = login_or_create_oauth_user(
+                        db=db,
+                        google_id=user_info.google_id,
+                        email=user_info.email,
+                        full_name=user_info.name,
+                        avatar_url=user_info.picture,
+                        refresh_token=user_info.refresh_token,
+                    )
+                    
+                    app.storage.user[SESSION_TOKEN_KEY] = token
+                    logger.info(f"OAuth login successful for {user_dto.email}")
+                    
+                    ui.notify(f'Willkommen, {user_dto.full_name or user_dto.username}!', type='positive')
+                    ui.navigate.to('/dashboard')
+                    
+                finally:
+                    db.close()
+                    
+            except OAuthDomainNotAllowedError as e:
+                logger.warning(f"OAuth domain not allowed: {e}")
+                ui.notify(str(e), type='negative')
+                ui.navigate.to('/login')
+            except InactiveUserError as e:
+                logger.warning(f"OAuth inactive user: {e}")
+                ui.notify(str(e), type='negative')
+                ui.navigate.to('/login')
+            except OAuthError as e:
+                logger.error(f"OAuth error: {e}")
+                ui.notify(f'Anmeldung fehlgeschlagen: {str(e)}', type='negative')
+                ui.navigate.to('/login')
+            except Exception as e:
+                logger.error(f"Unexpected OAuth error: {e}")
+                ui.notify('Ein unerwarteter Fehler ist aufgetreten', type='negative')
+                ui.navigate.to('/login')
+        
+        # Start processing after page is connected
+        ui.timer(0.1, process_oauth, once=True)
+    return None
 
 
 @ui.page('/logout')
@@ -474,6 +501,7 @@ def logout_page():
 
     ui.notify('Logged out successfully', type='positive')
     ui.navigate.to('/login')
+    return None
 
 
 def init_app():

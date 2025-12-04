@@ -1276,9 +1276,7 @@ def render(user):
             state['active_code_filters'].clear()
             state['search_text'] = ''
             search_input.value = ''
-            search_input.update()
             code_type_select.value = []
-            code_type_select.update()
             apply_filters()
         
         def on_text_search(e=None):
@@ -1302,15 +1300,12 @@ def render(user):
                 teams = list(hierarchy[server].keys())
                 team_select.options = teams
                 team_select.value = teams[0] if teams else None
-                team_select.update()
                 update_databases()
             else:
                 team_select.options = []
                 team_select.value = None
-                team_select.update()
                 database_select.options = []
                 database_select.value = None
-                database_select.update()
         
         def update_databases(e=None):
             """Update database dropdown when team changes"""
@@ -1320,12 +1315,10 @@ def render(user):
                 databases = [df['database'] for df in hierarchy[server][team]]
                 database_select.options = databases
                 database_select.value = databases[0] if databases else None
-                database_select.update()
                 load_selected_database()
             else:
                 database_select.options = []
                 database_select.value = None
-                database_select.update()
         
         def load_selected_database(e=None):
             """Load code tree for selected database"""
@@ -1451,10 +1444,8 @@ def load_single_database(df, container, state):
         code_type_select_elem = ui_state.get('code_type_select')
         if code_type_select_elem:
             code_type_select_elem.value = []
-            code_type_select_elem.update()
         if search_input_elem:
             search_input_elem.value = ''
-            search_input_elem.update()
         
         with container:
             if entries:

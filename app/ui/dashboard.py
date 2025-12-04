@@ -169,8 +169,10 @@ def render_recent_changes(user):
     db = get_db()
     
     try:
-        # Get recent changelogs
-        query = db.query(ChangeLog).join(Database).join(Team).join(Server)
+        # Get recent changelogs with database info eagerly loaded
+        query = db.query(ChangeLog, Database.name.label('db_name')).join(
+            Database, ChangeLog.database_id == Database.id
+        ).join(Team).join(Server)
         
         if not user.is_admin:
             query = query.filter(Server.user_id == user.id)
@@ -194,8 +196,8 @@ def render_recent_changes(user):
                 ui.label('Änderungen werden bei Synchronisierungen aufgezeichnet.').classes('text-xs text-grey-6 text-center')
         else:
             with ui.column().classes('w-full gap-2'):
-                for changelog in recent_changes:
-                    render_change_item(changelog, db)
+                for changelog, db_name in recent_changes:
+                    render_change_item(changelog, db_name)
                 
                 # Link to full changes page
                 if total_count > 5:
@@ -208,12 +210,8 @@ def render_recent_changes(user):
                         ).props('flat dense')
 
 
-def render_change_item(changelog: ChangeLog, db):
+def render_change_item(changelog: ChangeLog, db_name: str):
     """Render a single change item in the dashboard widget"""
-    # Get database name
-    database = db.query(Database).filter(Database.id == changelog.database_id).first()
-    db_name = database.name if database else 'Unbekannt'
-    
     # Format date relative
     date_str = format_relative_time(changelog.commit_date)
     

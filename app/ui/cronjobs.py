@@ -98,7 +98,6 @@ def render_selectors(user, cronjobs_container):
                     team_options = {team.name: team for team in teams}
                     team_select.options = list(team_options.keys())
                     team_select.value = list(team_options.keys())[0] if team_options else None
-                    team_select.update()
                     team_select.team_options = team_options
 
                     if team_select.value:

@@ -134,7 +134,6 @@ def render(user):
                         filtered_team_names = ['All Teams'] + [t.name for t in server_teams]
                         team_filter.options = filtered_team_names
                         team_filter.value = 'All Teams'
-                        team_filter.update()
                         logger.info(f"Updated team filter to {len(filtered_team_names)} teams")
                     finally:
                         filter_db.close()

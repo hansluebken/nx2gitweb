@@ -315,11 +315,18 @@ class GoogleDriveService:
         # Build the batch update request
         requests = []
         
-        # Delete existing content (if any)
+        # Delete existing content (if any) - only if there's content to delete
         body = doc_data.get("body", {})
-        end_index = body.get("content", [{}])[-1].get("endIndex", 1)
+        content_list = body.get("content", [])
         
-        if end_index > 1:
+        # Calculate actual content length (excluding the final newline character)
+        end_index = 1
+        if content_list:
+            last_element = content_list[-1]
+            end_index = last_element.get("endIndex", 1)
+        
+        # Only delete if there's actual content (end_index > 2 means more than just newline)
+        if end_index > 2:
             requests.append({
                 "deleteContentRange": {
                     "range": {
@@ -347,7 +354,7 @@ class GoogleDriveService:
             logger.error(f"Failed to update document content: {result}")
             return False
         
-        logger.info(f"Updated document {doc_id} content")
+        logger.info(f"Updated document {doc_id} content ({len(content)} chars)")
         return True
     
     async def upload_json_as_doc(
@@ -383,11 +390,10 @@ class GoogleDriveService:
                           f"Bitte erstellen Sie den Shared Drive und laden Sie als Mitbearbeiter ein."
                 )
             
-            # Create folder path
+            # Create folder path: server/team (no database subfolder)
             path_parts = [
                 sanitize_path_name(server_name),
                 sanitize_path_name(team_name),
-                sanitize_path_name(database_name),
             ]
             
             folder_id = await self.create_folder_path(drive_id, path_parts)
@@ -400,7 +406,8 @@ class GoogleDriveService:
             # Format JSON content for readability
             formatted_json = json.dumps(json_content, indent=2, ensure_ascii=False)
             
-            doc_name = "komplett.json"
+            # Filename: {database_name}-komplett.json
+            doc_name = f"{sanitize_path_name(database_name)}-komplett.json"
             doc_id = existing_doc_id
             
             # If we have an existing doc ID, try to update it

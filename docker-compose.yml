@@ -79,7 +79,7 @@ services:
     
     networks:
       - nx2git-internal
-      - proxy-network  # Comment out for Option B/C
+      - proxy-network
     depends_on:
       postgres:
         condition: service_healthy
