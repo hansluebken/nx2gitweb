@@ -66,17 +66,24 @@ def get_db_context(data: Dict[str, Any]) -> Dict[str, Any]:
     return info
 
 
-def generate_markdown_from_backup(backup_data: Dict[str, Any], database_name: str = "Database") -> str:
+def generate_markdown_from_backup(backup_data: Dict[str, Any], database_name: str = "Database",
+                                   external_db_structures: Dict[str, Dict[str, Any]] = None) -> str:
     """
     Generate comprehensive Markdown documentation from a Ninox complete-backup.json.
     
     Args:
         backup_data: The complete backup dictionary containing schema, views, reports
         database_name: Name of the database for the title
+        external_db_structures: Dict mapping external DB IDs to their schema structures
+                               Used to resolve table/field names in external references
+                               Format: {db_id: {schema: {types: {...}}}}
         
     Returns:
         Markdown formatted string
     """
+    if external_db_structures is None:
+        external_db_structures = {}
+    
     lines = []
     
     # Get database context (name, external DBs)
@@ -171,7 +178,7 @@ def generate_markdown_from_backup(backup_data: Dict[str, Any], database_name: st
     )
     
     for type_id, type_data in sorted_types:
-        table_md = _generate_table_section(type_id, type_data, table_map, db_context["ext_dbs"], types)
+        table_md = _generate_table_section(type_id, type_data, table_map, db_context["ext_dbs"], types, external_db_structures)
         lines.extend(table_md)
     
     # 3. Views Section
@@ -208,8 +215,12 @@ def generate_markdown_from_backup(backup_data: Dict[str, Any], database_name: st
 
 def _generate_table_section(type_id: str, type_data: Dict[str, Any], 
                             table_map: Dict[str, str], ext_db_map: Dict[str, str],
-                            all_types: Dict[str, Any] = None) -> List[str]:
+                            all_types: Dict[str, Any] = None,
+                            external_db_structures: Dict[str, Dict[str, Any]] = None) -> List[str]:
     """Generate Markdown section for a single table."""
+    if external_db_structures is None:
+        external_db_structures = {}
+    
     lines = []
     
     caption = type_data.get("caption", type_id)
@@ -264,7 +275,7 @@ def _generate_table_section(type_id: str, type_data: Dict[str, Any],
         field_type = field_data.get("base", "unknown")
         
         # Get reference/extra info
-        extra = _get_relation_info(field_data, table_map, ext_db_map, all_types)
+        extra = _get_relation_info(field_data, table_map, ext_db_map, all_types, external_db_structures)
         
         # Choice options
         if "values" in field_data and field_data["values"]:
@@ -306,8 +317,12 @@ def _generate_table_section(type_id: str, type_data: Dict[str, Any],
 
 
 def _get_relation_info(field_data: Dict[str, Any], table_map: Dict[str, str], 
-                       ext_db_map: Dict[str, str], all_types: Dict[str, Any] = None) -> str:
+                       ext_db_map: Dict[str, str], all_types: Dict[str, Any] = None,
+                       external_db_structures: Dict[str, Dict[str, Any]] = None) -> str:
     """Erstellt lesbaren String für Verknüpfungen mit Feld-zu-Feld Referenz."""
+    if external_db_structures is None:
+        external_db_structures = {}
+    
     base = field_data.get("base", "")
     
     if base not in ["ref", "rev"]:
@@ -315,10 +330,54 @@ def _get_relation_info(field_data: Dict[str, Any], table_map: Dict[str, str],
     
     # Target table
     target_table_id = field_data.get("refTypeId") or field_data.get("refType", "")
-    target_table_name = table_map.get(target_table_id, target_table_id)
-    
-    # Get the referenced field in the target table
     ref_field_id = field_data.get("refFieldId", "")
+    
+    # Check if external
+    ext_id = field_data.get("dbId", "")
+    
+    # Determine cardinality
+    cardinality = "n:1" if base == "ref" else "1:n"
+    
+    if ext_id:
+        # External reference - try to resolve table/field names from external DB structure
+        db_name = ext_db_map.get(ext_id, ext_id)
+        
+        target_table_name = target_table_id  # Default to ID
+        ref_field_name = ""
+        
+        # Try to resolve from external DB structure
+        if ext_id in external_db_structures:
+            ext_schema = external_db_structures[ext_id]
+            ext_types = None
+            
+            # Handle different structure formats
+            if "schema" in ext_schema:
+                if "schema" in ext_schema["schema"]:
+                    ext_types = ext_schema["schema"]["schema"].get("types", {})
+                elif "types" in ext_schema["schema"]:
+                    ext_types = ext_schema["schema"].get("types", {})
+            elif "types" in ext_schema:
+                ext_types = ext_schema.get("types", {})
+            
+            if ext_types and target_table_id in ext_types:
+                target_table_name = ext_types[target_table_id].get("caption", target_table_id)
+                
+                # Get field name
+                if ref_field_id:
+                    target_fields = ext_types[target_table_id].get("fields", {})
+                    if ref_field_id in target_fields:
+                        ref_field_name = target_fields[ref_field_id].get("caption", ref_field_id)
+        
+        # Build target string
+        if ref_field_name:
+            target_str = f"`{target_table_name}.{ref_field_name}`"
+        else:
+            target_str = f"`{target_table_name}`"
+        
+        return f"🔗 **EXTERN** [{cardinality}] → {target_str} in DB `{db_name}` (ID: `{ext_id}`)"
+    
+    # Internal reference
+    target_table_name = table_map.get(target_table_id, target_table_id)
     ref_field_name = ""
     
     if ref_field_id and all_types and target_table_id in all_types:
@@ -331,17 +390,6 @@ def _get_relation_info(field_data: Dict[str, Any], table_map: Dict[str, str],
         target_str = f"`{target_table_name}.{ref_field_name}`"
     else:
         target_str = f"`{target_table_name}`"
-    
-    # Determine cardinality
-    # ref = n:1 (this record points to ONE target record)
-    # rev = 1:n (this record has MANY related records)
-    cardinality = "n:1" if base == "ref" else "1:n"
-    
-    # Check if external
-    ext_id = field_data.get("dbId", "")
-    if ext_id:
-        db_name = ext_db_map.get(ext_id, ext_id)
-        return f"🔗 **EXTERN** [{cardinality}] → {target_str} in DB `{db_name}` (ID: `{ext_id}`)"
     
     # Build relation type string
     if base == "ref":
@@ -580,15 +628,17 @@ def _generate_report_section(report: Dict[str, Any]) -> List[str]:
 
 
 # Convenience function for direct dict input
-def generate_markdown(data: Dict[str, Any], name: str = "Database") -> str:
+def generate_markdown(data: Dict[str, Any], name: str = "Database",
+                      external_db_structures: Dict[str, Dict[str, Any]] = None) -> str:
     """
     Convenience wrapper for generate_markdown_from_backup.
     
     Args:
         data: Complete backup dictionary
         name: Database name
+        external_db_structures: Dict mapping external DB IDs to their schema structures
         
     Returns:
         Markdown string
     """
-    return generate_markdown_from_backup(data, name)
+    return generate_markdown_from_backup(data, name, external_db_structures)

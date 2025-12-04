@@ -592,13 +592,39 @@ def handle_sync_click(user, server, team, database, container, button):
     asyncio.create_task(run_sync())
 
 
-async def sync_database(user, server, team, database, container, progress_label=None):
-    """Sync a single database - includes Schema, Views, Reports, and Report Files"""
+async def sync_database(user, server, team, database, container, progress_label=None, already_syncing=None):
+    """
+    Sync a single database - includes Schema, Views, Reports, and Report Files.
+    
+    Also syncs linked external databases first to ensure their structure is available
+    for resolving table/field names in the Markdown documentation.
+    
+    Args:
+        user: Current user
+        server: Server model
+        team: Team model
+        database: Database model
+        container: UI container for updates
+        progress_label: Optional label to show progress
+        already_syncing: Set of database_ids currently being synced (for loop protection)
+    """
     import logging
     logger = logging.getLogger(__name__)
+    
+    # Initialize loop protection set
+    if already_syncing is None:
+        already_syncing = set()
+    
+    # Check if we're already syncing this database (loop protection)
+    if database.database_id in already_syncing:
+        logger.info(f"Skipping {database.name} - already syncing (loop protection)")
+        return
 
     try:
         logger.info(f"=== SYNC START === Database: {database.name} (id={database.id})")
+        
+        # Add this database to the syncing set
+        already_syncing.add(database.database_id)
 
         # Step 1: Decrypt credentials
         if progress_label:
@@ -630,6 +656,57 @@ async def sync_database(user, server, team, database, container, progress_label=
             database.database_id
         )
         logger.info(f"Structure fetched: {len(str(db_structure))} chars")
+
+        # Step 3a: Sync linked external databases first (for MD name resolution)
+        known_dbs = db_structure.get('schema', {}).get('knownDatabases', [])
+        if known_dbs:
+            logger.info(f"Found {len(known_dbs)} external database links")
+            
+            # Get all databases in this team from our system
+            db_session = get_db()
+            try:
+                team_databases = db_session.query(Database).filter(
+                    Database.team_id == team.id
+                ).all()
+                
+                # Create mapping: ninox_database_id -> Database model
+                db_by_ninox_id = {db.database_id: db for db in team_databases}
+                
+                for ext_db_info in known_dbs:
+                    ext_db_id = ext_db_info.get('dbId')
+                    ext_db_name = ext_db_info.get('name', ext_db_id)
+                    
+                    if ext_db_id and ext_db_id not in already_syncing:
+                        # Check if this external DB exists in our system
+                        linked_db = db_by_ninox_id.get(ext_db_id)
+                        
+                        if linked_db:
+                            logger.info(f"Syncing linked database: {ext_db_name} (ID: {ext_db_id})")
+                            if progress_label:
+                                progress_label.text = f'Syncing linked DB: {ext_db_name}...'
+                                await asyncio.sleep(0.1)
+                            
+                            try:
+                                # Recursively sync the linked database
+                                await sync_database(
+                                    user, server, team, linked_db, container,
+                                    progress_label=None,  # Don't update progress for sub-syncs
+                                    already_syncing=already_syncing
+                                )
+                                logger.info(f"Linked database synced: {ext_db_name}")
+                            except Exception as link_err:
+                                logger.warning(f"Could not sync linked DB {ext_db_name}: {link_err}")
+                                # Continue with main sync even if linked DB fails
+                        else:
+                            logger.info(f"Linked DB {ext_db_name} (ID: {ext_db_id}) not found in our system - skipping")
+                    elif ext_db_id in already_syncing:
+                        logger.info(f"Linked DB {ext_db_name} already being synced - skipping (loop protection)")
+            finally:
+                db_session.close()
+            
+            if progress_label:
+                progress_label.text = f'Continuing sync of {database.name}...'
+                await asyncio.sleep(0.1)
 
         # Step 3b: Fetch Views (Ansichten)
         if progress_label:
@@ -845,10 +922,59 @@ async def sync_database(user, server, team, database, container, progress_label=
                 progress_label.text = 'Generating Markdown documentation...'
                 await asyncio.sleep(0.1)
 
+            # Load external database structures from local files (synced earlier in cascade)
+            # Initialize outside try block so it's available for local save later
+            external_db_structures = {}
+            
             try:
+                known_dbs = db_structure.get('schema', {}).get('knownDatabases', [])
+                
+                if known_dbs:
+                    if progress_label:
+                        progress_label.text = f'Loading {len(known_dbs)} external database structures from local files...'
+                        await asyncio.sleep(0.1)
+                    
+                    # Get all databases in this team to find local file paths
+                    db_session = get_db()
+                    try:
+                        team_databases = db_session.query(Database).filter(
+                            Database.team_id == team.id
+                        ).all()
+                        db_by_ninox_id = {db.database_id: db for db in team_databases}
+                    finally:
+                        db_session.close()
+                    
+                    import os
+                    server_name_safe = sanitize_name(server.name)
+                    team_name_safe = sanitize_name(team.name)
+                    
+                    for ext_db in known_dbs:
+                        ext_db_id = ext_db.get('dbId')
+                        ext_db_name = ext_db.get('name', ext_db_id)
+                        
+                        if ext_db_id:
+                            # Try to load from local file (should exist if cascade sync worked)
+                            linked_db = db_by_ninox_id.get(ext_db_id)
+                            if linked_db:
+                                try:
+                                    ext_db_name_safe = sanitize_name(linked_db.name)
+                                    ext_local_path = f'/app/data/code/{server_name_safe}/{team_name_safe}/{ext_db_name_safe}/complete-backup.json'
+                                    
+                                    if os.path.exists(ext_local_path):
+                                        with open(ext_local_path, 'r', encoding='utf-8') as f:
+                                            ext_backup = json.load(f)
+                                        external_db_structures[ext_db_id] = ext_backup
+                                        logger.info(f"Loaded external DB structure from local file: {ext_db_name}")
+                                    else:
+                                        logger.warning(f"Local file not found for external DB {ext_db_name}: {ext_local_path}")
+                                except Exception as ext_err:
+                                    logger.warning(f"Could not load external DB {ext_db_name} from local file: {ext_err}")
+                            else:
+                                logger.info(f"External DB {ext_db_name} (ID: {ext_db_id}) not in our system - using IDs")
+                
                 # Generate Markdown from complete backup
                 logger.info(f"Generating Markdown documentation for {database.name}...")
-                md_content = generate_markdown_from_backup(complete_backup, database.name)
+                md_content = generate_markdown_from_backup(complete_backup, database.name, external_db_structures)
                 
                 if md_content:
                     logger.info(f"Generated Markdown: {len(md_content)} bytes")
@@ -946,8 +1072,9 @@ async def sync_database(user, server, team, database, container, progress_label=
                 logger.info(f"Saved complete-backup.json to {backup_local_path}")
                 
                 # Save complete-backup.md locally (Markdown documentation)
+                # Note: external_db_structures should still be available from the upload step
                 try:
-                    md_local_content = generate_markdown_from_backup(complete_backup, database.name)
+                    md_local_content = generate_markdown_from_backup(complete_backup, database.name, external_db_structures)
                     if md_local_content:
                         md_local_path = f'{local_base_path}/complete-backup.md'
                         with open(md_local_path, 'w', encoding='utf-8') as f:
