@@ -15,6 +15,36 @@ def sanitize_name(name):
     return safe_name
 
 
+def sanitize_repo_name(name):
+    """
+    Sanitize a name for use as a GitHub repository name.
+    
+    GitHub repository names can only contain:
+    - Alphanumeric characters (a-z, A-Z, 0-9)
+    - Hyphens (-)
+    - Underscores (_)
+    - Dots (.)
+    
+    They cannot:
+    - Start or end with a dot
+    - Contain consecutive dots
+    - Be longer than 100 characters
+    """
+    # Replace spaces and other invalid characters with hyphens
+    safe_name = re.sub(r'[^a-zA-Z0-9._-]', '-', name)
+    # Remove consecutive hyphens or dots
+    safe_name = re.sub(r'-+', '-', safe_name)
+    safe_name = re.sub(r'\.+', '.', safe_name)
+    # Remove leading/trailing hyphens, dots, and underscores
+    safe_name = safe_name.strip('-._')
+    # Truncate to 100 characters (GitHub limit)
+    safe_name = safe_name[:100]
+    # Ensure it's not empty
+    if not safe_name:
+        safe_name = 'repository'
+    return safe_name
+
+
 def get_repo_name_from_server(server):
     """Get the repository name based on the server URL
 
@@ -27,4 +57,4 @@ def get_repo_name_from_server(server):
     # Extract server hostname from URL for repository name
     # e.g. "https://hagedorn.ninoxdb.de" -> "hagedorn.ninoxdb.de"
     server_hostname = server.url.replace('https://', '').replace('http://', '').split('/')[0]
-    return sanitize_name(server_hostname)
+    return sanitize_repo_name(server_hostname)

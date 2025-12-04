@@ -90,6 +90,18 @@ class GitHubManager:
         Returns:
             GitHub Repository Objekt
         """
+        # Sanitize repo name for GitHub (only alphanumeric, hyphens, underscores, and dots)
+        import re
+        sanitized_name = re.sub(r'[^a-zA-Z0-9._-]', '-', repo_name)
+        # Remove consecutive hyphens
+        sanitized_name = re.sub(r'-+', '-', sanitized_name)
+        # Remove leading/trailing hyphens
+        sanitized_name = sanitized_name.strip('-')
+        
+        if sanitized_name != repo_name:
+            print(f"  ℹ Repository name sanitized: '{repo_name}' -> '{sanitized_name}'")
+            repo_name = sanitized_name
+        
         try:
             # Versuche das Repository zu holen
             return self.owner.get_repo(repo_name)
@@ -105,12 +117,47 @@ class GitHubManager:
                     'auto_init': True,  # Mit README.md initialisieren
                 }
                 
-                # create_repo funktioniert für Organization und AuthenticatedUser
-                # Für User-Accounts verwenden wir immer den authentifizierten User
-                if self.is_org:
-                    return self.owner.create_repo(**repo_data)  # type: ignore
-                else:
-                    return self.github.get_user().create_repo(**repo_data)  # type: ignore
+                try:
+                    # create_repo funktioniert für Organization und AuthenticatedUser
+                    # Für User-Accounts verwenden wir immer den authentifizierten User
+                    if self.is_org:
+                        return self.owner.create_repo(**repo_data)  # type: ignore
+                    else:
+                        return self.github.get_user().create_repo(**repo_data)  # type: ignore
+                except GithubException as create_error:
+                    # Parse the error for better debugging
+                    error_msg = str(create_error)
+                    error_data = create_error.data if hasattr(create_error, 'data') else {}
+                    
+                    if create_error.status == 422:
+                        # 422 can mean:
+                        # - Repository already exists (race condition)
+                        # - Invalid repository name
+                        # - Other validation errors
+                        errors = error_data.get('errors', []) if isinstance(error_data, dict) else []
+                        error_details = []
+                        for err in errors:
+                            if isinstance(err, dict):
+                                field = err.get('field', 'unknown')
+                                code = err.get('code', 'unknown')
+                                message = err.get('message', '')
+                                error_details.append(f"{field}: {code} - {message}")
+                        
+                        # Check if it's "name already exists" error
+                        if any('name' in str(err).lower() and 'exists' in str(err).lower() for err in errors):
+                            print(f"  ⟳ Repository '{repo_name}' already exists, fetching...")
+                            try:
+                                return self.owner.get_repo(repo_name)
+                            except:
+                                pass
+                        
+                        detail_str = '; '.join(error_details) if error_details else str(error_data)
+                        raise GithubException(
+                            create_error.status,
+                            f"Repository creation failed for '{repo_name}': {detail_str}",
+                            create_error.headers if hasattr(create_error, 'headers') else None
+                        )
+                    raise
             else:
                 raise
     
@@ -175,10 +222,10 @@ class GitHubManager:
     
     def update_file(self, repo, file_path: str, content: str, 
                    commit_message: str, branch: str = "main",
-                   max_retries: int = 3):
+                   max_retries: int = 10):
         """
         Erstellt oder aktualisiert eine Datei im Repository.
-        Bei SHA-Konflikten (409) wird automatisch der aktuelle SHA geholt und erneut versucht.
+        Bei SHA-Konflikten (409/422) wird automatisch der aktuelle SHA geholt und erneut versucht.
         
         Args:
             repo: Repository Objekt
@@ -186,12 +233,24 @@ class GitHubManager:
             content: Neuer Dateiinhalt
             commit_message: Commit-Nachricht
             branch: Branch Name (default: main)
-            max_retries: Maximale Anzahl Versuche bei SHA-Konflikten (default: 3)
+            max_retries: Maximale Anzahl Versuche bei SHA-Konflikten (default: 10)
         
         Returns:
             ContentFile Objekt
         """
         import time
+        import random
+        
+        def is_sha_conflict(error):
+            """Check if error is a SHA conflict (can be 409 or 422 with specific message)"""
+            if error.status == 409:
+                return True
+            if error.status == 422:
+                error_str = str(error.data) if hasattr(error, 'data') else str(error)
+                # GitHub returns "is at X but expected Y" for SHA conflicts
+                if 'but expected' in error_str or 'does not match' in error_str:
+                    return True
+            return False
         
         for attempt in range(max_retries):
             try:
@@ -226,17 +285,22 @@ class GitHubManager:
                         return result['content']
                     except GithubException as create_error:
                         # File was created by another process between get_contents and create_file
-                        if create_error.status == 422 and attempt < max_retries - 1:
-                            print(f"    ⟳ Retry {attempt + 1}/{max_retries} (file created by another process): {file_path}")
-                            time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                        if (create_error.status == 422 or is_sha_conflict(create_error)) and attempt < max_retries - 1:
+                            # Add random jitter to prevent thundering herd
+                            wait_time = (0.5 * (attempt + 1)) + random.uniform(0, 0.5)
+                            print(f"    ⟳ Retry {attempt + 1}/{max_retries} (file created by another process, waiting {wait_time:.1f}s): {file_path}")
+                            time.sleep(wait_time)
                             continue
                         raise
                 
-                elif e.status == 409:
+                elif is_sha_conflict(e):
                     # SHA conflict - file was modified by another process
                     if attempt < max_retries - 1:
-                        print(f"    ⟳ Retry {attempt + 1}/{max_retries} (SHA conflict): {file_path}")
-                        time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                        # Exponential backoff with jitter
+                        base_wait = min(2 ** attempt, 30)  # Cap at 30 seconds
+                        wait_time = base_wait + random.uniform(0, base_wait * 0.5)
+                        print(f"    ⟳ Retry {attempt + 1}/{max_retries} (SHA conflict, waiting {wait_time:.1f}s): {file_path}")
+                        time.sleep(wait_time)
                         continue
                     else:
                         print(f"    ✗ SHA conflict nach {max_retries} Versuchen: {file_path}")

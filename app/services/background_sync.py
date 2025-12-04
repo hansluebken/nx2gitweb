@@ -46,7 +46,8 @@ class BackgroundSyncManager:
             return
             
         self._initialized = True
-        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sync_")
+        # Reduce max_workers to 2 to minimize SHA conflicts during parallel syncs
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sync_")
         self._active_syncs: Dict[int, SyncTask] = {}  # database_id -> SyncTask
         self._sync_lock = threading.Lock()
         self._bulk_sync_active: bool = False
@@ -342,8 +343,11 @@ class BackgroundSyncManager:
         )
         
         # Check for linked databases and sync them first
+        # SKIP cascade syncs during bulk sync - all DBs are synced anyway
+        # Full cascade is enabled - loop protection via already_syncing set
         known_dbs = db_structure.get('schema', {}).get('knownDatabases', [])
-        if known_dbs:
+        
+        if known_dbs and not self._bulk_sync_active:
             logger.info(f"Found {len(known_dbs)} linked databases for {database_name}")
             
             db = get_db()
@@ -364,6 +368,17 @@ class BackgroundSyncManager:
                     if linked_db:
                         logger.info(f"Cascade syncing linked DB: {ext_db_name}")
                         try:
+                            # Set sync_status for cascade DB
+                            db_session = get_db()
+                            try:
+                                cascade_db = db_session.query(Database).filter(Database.id == linked_db.id).first()
+                                if cascade_db:
+                                    cascade_db.sync_status = SyncStatus.SYNCING.value
+                                    cascade_db.sync_started_at = datetime.utcnow()
+                                    db_session.commit()
+                            finally:
+                                db_session.close()
+                            
                             linked_db_data = {
                                 'id': linked_db.id,
                                 'name': linked_db.name,
@@ -377,8 +392,32 @@ class BackgroundSyncManager:
                                 linked_db_data,
                                 already_syncing
                             )
+                            
+                            # Reset sync_status after cascade sync
+                            db_session = get_db()
+                            try:
+                                cascade_db = db_session.query(Database).filter(Database.id == linked_db.id).first()
+                                if cascade_db:
+                                    cascade_db.sync_status = SyncStatus.IDLE.value
+                                    cascade_db.last_modified = datetime.utcnow()
+                                    db_session.commit()
+                            finally:
+                                db_session.close()
+                                
                         except Exception as link_err:
                             logger.warning(f"Could not cascade sync {ext_db_name}: {link_err}")
+                            # Reset status on error
+                            try:
+                                db_session = get_db()
+                                cascade_db = db_session.query(Database).filter(Database.id == linked_db.id).first()
+                                if cascade_db:
+                                    cascade_db.sync_status = SyncStatus.IDLE.value
+                                    db_session.commit()
+                                db_session.close()
+                            except:
+                                pass
+        elif known_dbs and self._bulk_sync_active:
+            logger.info(f"Skipping cascade sync for {database_name} - bulk sync active")
         
         # Fetch views and reports
         views_data = []
@@ -408,8 +447,15 @@ class BackgroundSyncManager:
         
         github_token = encryption.decrypt(user_data['github_token_encrypted'])
         
-        # Get repo name
-        repo_name = server_data.get('github_repo_name') or sanitize_name(server_data['name'])
+        # Get repo name using the helper function
+        # Create a mock server object for get_repo_name_from_server
+        class MockServer:
+            def __init__(self, url, github_repo_name=None):
+                self.url = url
+                self.github_repo_name = github_repo_name
+        
+        mock_server = MockServer(server_data['url'], server_data.get('github_repo_name'))
+        repo_name = get_repo_name_from_server(mock_server)
         
         github_mgr = GitHubManager(
             access_token=github_token,

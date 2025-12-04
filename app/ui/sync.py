@@ -409,34 +409,40 @@ async def generate_ai_changelog(
 
 
 
-def load_databases(user, server, team, container, setup_refresh=True):
-    """Load and display databases for a team"""
+def create_database_panel(user, server, team, container):
+    """
+    Creates a refreshable database panel using @ui.refreshable.
+    This allows the UI to update properly when the timer fires.
+    """
     import logging
     from ..models.database import SyncStatus
     from ..services.background_sync import get_sync_manager
     
     logger = logging.getLogger(__name__)
-
-    container.clear()
     
-    # Get sync manager for bulk sync status
-    sync_manager = get_sync_manager()
-    bulk_sync_active = sync_manager.is_bulk_sync_active(team.id)
-    bulk_progress = sync_manager.get_bulk_sync_progress()
-
-    db = get_db()
-    try:
-        logger.info(f"Loading databases for team_id={team.id}, team_name={team.name}")
-        databases = db.query(Database).filter(
-            Database.team_id == team.id
-        ).order_by(Database.name).all()
-        logger.info(f"Found {len(databases)} databases for team {team.name}")
+    # Store timer reference
+    refresh_timer_holder = {'timer': None}
+    
+    @ui.refreshable
+    def database_list():
+        """Refreshable database list - call database_list.refresh() to update"""
+        sync_manager = get_sync_manager()
+        bulk_sync_active = sync_manager.is_bulk_sync_active(team.id)
         
-        # Check if any database is syncing
-        any_syncing = any(d.sync_status == SyncStatus.SYNCING.value for d in databases)
-
-        if not databases:
-            with container:
+        db = get_db()
+        try:
+            databases = db.query(Database).filter(
+                Database.team_id == team.id
+            ).order_by(Database.name).all()
+            
+            # Check sync status from DB
+            syncing_count = sum(1 for d in databases if d.sync_status == SyncStatus.SYNCING.value)
+            any_syncing = syncing_count > 0
+            total_count = len([d for d in databases if not d.is_excluded])
+            completed_count = total_count - syncing_count
+            is_busy = bulk_sync_active or any_syncing
+            
+            if not databases:
                 EmptyState.render(
                     icon='folder',
                     title='No Databases',
@@ -444,74 +450,74 @@ def load_databases(user, server, team, container, setup_refresh=True):
                     action_label='Go to Teams',
                     on_action=lambda: ui.navigate.to('/teams')
                 )
-        else:
-            with container:
-                # Bulk actions
+            else:
+                # Bulk actions header
                 with ui.row().classes('w-full items-center justify-between mb-4'):
                     with ui.row().classes('items-center gap-2'):
                         ui.label('Databases').classes('text-h6 font-bold')
-                        # Show bulk sync progress indicator
+                        # Show different indicators for bulk sync vs individual sync
                         if bulk_sync_active:
+                            # Bulk sync: show progress counter
                             ui.spinner(size='sm', color='primary')
-                            completed, total = bulk_progress
-                            ui.label(f'Bulk sync: {completed}/{total}').classes('text-caption text-primary font-bold')
+                            ui.label(f'Bulk sync: {total_count - syncing_count}/{total_count}').classes('text-caption text-primary font-bold')
                         elif any_syncing:
+                            # Individual sync: just show how many are syncing
                             ui.spinner(size='sm', color='primary')
-                            ui.label('Sync in progress...').classes('text-caption text-primary')
+                            ui.label(f'{syncing_count} syncing...').classes('text-caption text-primary')
                     
-                    # Disable Sync All button during bulk sync
-                    sync_all_btn = ui.button(
-                        'Syncing...' if bulk_sync_active else 'Sync All',
+                    ui.button(
+                        'Syncing...' if is_busy else 'Sync All',
                         icon='sync',
                         on_click=lambda: sync_all_databases(user, server, team, databases, container)
-                    ).props(f'color=primary {"loading disable" if bulk_sync_active else ""}')
+                    ).props(f'color=primary {"loading disable" if is_busy else ""}')
 
-                # Database cards
+                # Database cards - pass bulk_sync_active, not is_busy
+                # Each card checks its own sync_status for spinner
                 for database in databases:
                     render_database_card(user, server, team, database, container, bulk_sync_active)
-                
-                # Setup auto-refresh timer if any database is syncing or bulk sync active
-                if (any_syncing or bulk_sync_active) and setup_refresh:
-                    # Create a timer that refreshes every 3 seconds while syncing
-                    refresh_timer = ui.timer(
-                        3.0,
-                        lambda: refresh_if_syncing(user, server, team, container),
-                        once=False
-                    )
-                    # Store timer reference on container for cleanup
-                    container._refresh_timer = refresh_timer
-
-    finally:
-        db.close()
-
-
-def refresh_if_syncing(user, server, team, container):
-    """Refresh database list if any sync is still in progress"""
-    from ..models.database import SyncStatus
-    from ..services.background_sync import get_sync_manager
+                    
+        finally:
+            db.close()
     
-    sync_manager = get_sync_manager()
-    bulk_sync_active = sync_manager.is_bulk_sync_active(team.id)
-    
-    db = get_db()
-    try:
-        # Check if any database in this team is still syncing
-        any_syncing = db.query(Database).filter(
-            Database.team_id == team.id,
-            Database.sync_status == SyncStatus.SYNCING.value
-        ).first() is not None
+    def check_and_refresh():
+        """Timer callback - check if still syncing and refresh"""
+        sync_manager = get_sync_manager()
+        bulk_active = sync_manager.is_bulk_sync_active(team.id)
         
-        if any_syncing or bulk_sync_active:
-            # Still syncing, reload to update status
-            load_databases(user, server, team, container, setup_refresh=False)
+        db = get_db()
+        try:
+            syncing_count = db.query(Database).filter(
+                Database.team_id == team.id,
+                Database.sync_status == SyncStatus.SYNCING.value
+            ).count()
+            still_syncing = syncing_count > 0
+        finally:
+            db.close()
+        
+        if still_syncing or bulk_active:
+            # Still syncing - refresh the UI
+            logger.info(f"Auto-refresh: {syncing_count} still syncing, bulk={bulk_active}")
+            database_list.refresh()
         else:
-            # No more syncing, stop the timer and do final reload
-            if hasattr(container, '_refresh_timer') and container._refresh_timer:
-                container._refresh_timer.cancel()
-                container._refresh_timer = None
-            load_databases(user, server, team, container, setup_refresh=False)
-    finally:
-        db.close()
+            # Done - stop timer and do final refresh
+            logger.info("All syncs complete - stopping timer")
+            if refresh_timer_holder['timer']:
+                refresh_timer_holder['timer'].cancel()
+                refresh_timer_holder['timer'] = None
+            database_list.refresh()
+    
+    # Render initial database list
+    with container:
+        database_list()
+        
+        # Setup auto-refresh timer (always, will self-cancel when not needed)
+        refresh_timer_holder['timer'] = ui.timer(2.0, check_and_refresh)
+
+
+def load_databases(user, server, team, container, setup_refresh=True):
+    """Load and display databases for a team"""
+    container.clear()
+    create_database_panel(user, server, team, container)
 
 
 def render_database_card(user, server, team, database, container, bulk_sync_active=False):
