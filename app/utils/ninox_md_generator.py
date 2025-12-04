@@ -169,7 +169,7 @@ def generate_markdown_from_backup(backup_data: Dict[str, Any], database_name: st
     )
     
     for type_id, type_data in sorted_types:
-        table_md = _generate_table_section(type_id, type_data, table_map, db_context["ext_dbs"])
+        table_md = _generate_table_section(type_id, type_data, table_map, db_context["ext_dbs"], types)
         lines.extend(table_md)
     
     # 3. Views Section
@@ -205,7 +205,8 @@ def generate_markdown_from_backup(backup_data: Dict[str, Any], database_name: st
 
 
 def _generate_table_section(type_id: str, type_data: Dict[str, Any], 
-                            table_map: Dict[str, str], ext_db_map: Dict[str, str]) -> List[str]:
+                            table_map: Dict[str, str], ext_db_map: Dict[str, str],
+                            all_types: Dict[str, Any] = None) -> List[str]:
     """Generate Markdown section for a single table."""
     lines = []
     
@@ -261,7 +262,7 @@ def _generate_table_section(type_id: str, type_data: Dict[str, Any],
         field_type = field_data.get("base", "unknown")
         
         # Get reference/extra info
-        extra = _get_relation_info(field_data, table_map, ext_db_map)
+        extra = _get_relation_info(field_data, table_map, ext_db_map, all_types)
         
         # Choice options
         if "values" in field_data and field_data["values"]:
@@ -303,27 +304,42 @@ def _generate_table_section(type_id: str, type_data: Dict[str, Any],
 
 
 def _get_relation_info(field_data: Dict[str, Any], table_map: Dict[str, str], 
-                       ext_db_map: Dict[str, str]) -> str:
-    """Erstellt lesbaren String für Verknüpfungen."""
+                       ext_db_map: Dict[str, str], all_types: Dict[str, Any] = None) -> str:
+    """Erstellt lesbaren String für Verknüpfungen mit Feld-zu-Feld Referenz."""
     base = field_data.get("base", "")
     
     if base not in ["ref", "rev"]:
         return ""
     
     # Target table
-    target_id = field_data.get("refTypeId") or field_data.get("refType", "")
-    target_name = table_map.get(target_id, target_id)
+    target_table_id = field_data.get("refTypeId") or field_data.get("refType", "")
+    target_table_name = table_map.get(target_table_id, target_table_id)
+    
+    # Get the referenced field in the target table
+    ref_field_id = field_data.get("refFieldId", "")
+    ref_field_name = ""
+    
+    if ref_field_id and all_types and target_table_id in all_types:
+        target_fields = all_types[target_table_id].get("fields", {})
+        if ref_field_id in target_fields:
+            ref_field_name = target_fields[ref_field_id].get("caption", ref_field_id)
+    
+    # Build the reference string
+    if ref_field_name:
+        target_str = f"`{target_table_name}.{ref_field_name}`"
+    else:
+        target_str = f"`{target_table_name}`"
     
     # Check if external
     ext_id = field_data.get("dbId", "")
     if ext_id:
         db_name = ext_db_map.get(ext_id, ext_id)
-        return f"🔗 **EXTERN** zu `{target_name}` in DB `{db_name}`"
+        return f"🔗 **EXTERN** zu {target_str} in DB `{db_name}`"
     
     rel_type = "Verknüpfung" if base == "ref" else "Rückverknüpfung"
     comp = " (Komposition)" if field_data.get("cascade") else ""
     
-    return f"🔗 {rel_type} zu `{target_name}`{comp}"
+    return f"🔗 {rel_type} zu {target_str}{comp}"
 
 
 def _extract_table_triggers(type_data: Dict[str, Any]) -> List[Tuple[str, str]]:
