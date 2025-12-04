@@ -14,10 +14,12 @@ from ..models.database import Database
 from ..utils.encryption import get_encryption_manager
 from ..utils.github_utils import sanitize_name, get_repo_name_from_server
 from ..utils.svg_erd_generator import generate_svg_erd
+from ..utils.ninox_md_generator import generate_markdown_from_backup
 from ..api.ninox_client import NinoxClient
 from ..api.github_manager import GitHubManager
 from ..auth import create_audit_log
 import json
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -172,8 +174,29 @@ class CronjobScheduler:
             db.commit()
             db.close()
 
-    async def sync_database(self, user, server, team, database):
-        """Sync a single database to GitHub"""
+    async def sync_database(self, user, server, team, database, already_syncing=None):
+        """
+        Sync a single database to GitHub with cascade sync for linked databases.
+        
+        Args:
+            user: User model with GitHub credentials
+            server: Server model
+            team: Team model
+            database: Database model to sync
+            already_syncing: Set of database_ids being synced (loop protection)
+        """
+        # Initialize loop protection set
+        if already_syncing is None:
+            already_syncing = set()
+        
+        # Check if already syncing (loop protection)
+        if database.database_id in already_syncing:
+            logger.info(f"    Skipping {database.name} - already syncing (loop protection)")
+            return
+        
+        # Add to syncing set
+        already_syncing.add(database.database_id)
+        
         # Run the synchronous operations in a thread pool to avoid blocking
         loop = asyncio.get_event_loop()
 
@@ -188,7 +211,44 @@ class CronjobScheduler:
 
             # Fetch database structure
             db_structure = client.get_database_structure(team.team_id, database.database_id)
-
+            
+            # Return structure for cascade sync check
+            return db_structure, client, encryption, api_key
+        
+        # Get structure first
+        db_structure, client, encryption, api_key = await loop.run_in_executor(None, sync_operation)
+        
+        # Check for linked databases and sync them first (cascade sync)
+        known_dbs = db_structure.get('schema', {}).get('knownDatabases', [])
+        if known_dbs:
+            logger.info(f"    Found {len(known_dbs)} linked databases")
+            
+            # Get all databases in this team
+            db_session = get_db()
+            try:
+                team_databases = db_session.query(Database).filter(
+                    Database.team_id == team.id
+                ).all()
+                db_by_ninox_id = {db.database_id: db for db in team_databases}
+            finally:
+                db_session.close()
+            
+            for ext_db_info in known_dbs:
+                ext_db_id = ext_db_info.get('dbId')
+                ext_db_name = ext_db_info.get('name', ext_db_id)
+                
+                if ext_db_id and ext_db_id not in already_syncing:
+                    linked_db = db_by_ninox_id.get(ext_db_id)
+                    if linked_db:
+                        logger.info(f"    Cascade syncing linked DB: {ext_db_name}")
+                        try:
+                            await self.sync_database(user, server, team, linked_db, already_syncing)
+                        except Exception as link_err:
+                            logger.warning(f"    Could not cascade sync {ext_db_name}: {link_err}")
+        
+        # Now continue with main sync
+        def complete_sync():
+            """Complete the sync operation with all components"""
             # Check if GitHub is configured
             if not user.github_token_encrypted or not user.github_organization:
                 logger.warning(f"    GitHub not configured for user {user.username}")
@@ -215,18 +275,116 @@ class CronjobScheduler:
             # Create path: team/dbname-structure.json
             team_name = sanitize_name(team.name)
             db_name = sanitize_name(database.name)
-            full_path = f'{team_name}/{db_name}-structure.json'
+            server_name = sanitize_name(server.name)
+            github_path = team_name
+            full_path = f'{github_path}/{db_name}-structure.json'
+            
+            # Fetch views and reports
+            views_data = []
+            reports_data = []
+            try:
+                views_data = client.get_views(team.team_id, database.database_id, full_view=True)
+                logger.info(f"    Fetched {len(views_data)} views")
+            except Exception as e:
+                logger.warning(f"    Could not fetch views: {e}")
+            
+            try:
+                reports_data = client.get_reports(team.team_id, database.database_id, full_report=True)
+                logger.info(f"    Fetched {len(reports_data)} reports")
+            except Exception as e:
+                logger.warning(f"    Could not fetch reports: {e}")
+            
+            # Create complete backup structure
+            complete_backup = {
+                'schema': db_structure,
+                'views': views_data,
+                'reports': reports_data,
+                'report_files': {},
+                '_metadata': {
+                    'synced_at': datetime.utcnow().isoformat(),
+                    'database_name': database.name,
+                    'database_id': database.database_id,
+                    'team_name': team.name,
+                    'team_id': team.team_id,
+                    'server_name': server.name,
+                }
+            }
 
             # Convert to JSON
             structure_json = json.dumps(db_structure, indent=2, ensure_ascii=False)
+            backup_json = json.dumps(complete_backup, indent=2, ensure_ascii=False)
 
-            # Upload to GitHub
+            # Upload structure to GitHub
             github_mgr.update_file(
                 repo=repo,
                 file_path=full_path,
                 content=structure_json,
                 commit_message=f'[Automated] Update {database.name} structure from {team.name}'
             )
+            
+            # Upload complete backup
+            backup_path = f'{github_path}/{db_name}-complete-backup.json'
+            github_mgr.update_file(
+                repo=repo,
+                file_path=backup_path,
+                content=backup_json,
+                commit_message=f'[Automated] Update {database.name} complete backup'
+            )
+            
+            # Save locally for MD generation
+            local_base_path = f'/app/data/code/{server_name}/{team_name}/{db_name}'
+            os.makedirs(local_base_path, exist_ok=True)
+            
+            with open(f'{local_base_path}/structure.json', 'w', encoding='utf-8') as f:
+                json.dump(db_structure, f, indent=2, ensure_ascii=False)
+            
+            with open(f'{local_base_path}/complete-backup.json', 'w', encoding='utf-8') as f:
+                json.dump(complete_backup, f, indent=2, ensure_ascii=False)
+            
+            # Load external DB structures from local files for MD generation
+            external_db_structures = {}
+            if known_dbs:
+                db_session = get_db()
+                try:
+                    team_databases = db_session.query(Database).filter(
+                        Database.team_id == team.id
+                    ).all()
+                    db_by_ninox_id = {db.database_id: db for db in team_databases}
+                finally:
+                    db_session.close()
+                
+                for ext_db in known_dbs:
+                    ext_db_id = ext_db.get('dbId')
+                    if ext_db_id:
+                        linked_db = db_by_ninox_id.get(ext_db_id)
+                        if linked_db:
+                            ext_db_name_safe = sanitize_name(linked_db.name)
+                            ext_local_path = f'/app/data/code/{server_name}/{team_name}/{ext_db_name_safe}/complete-backup.json'
+                            if os.path.exists(ext_local_path):
+                                try:
+                                    with open(ext_local_path, 'r', encoding='utf-8') as f:
+                                        external_db_structures[ext_db_id] = json.load(f)
+                                except Exception:
+                                    pass
+            
+            # Generate and upload Markdown documentation
+            try:
+                md_content = generate_markdown_from_backup(complete_backup, database.name, external_db_structures)
+                if md_content:
+                    md_path = f'{github_path}/{db_name}-complete-backup.md'
+                    github_mgr.update_file(
+                        repo=repo,
+                        file_path=md_path,
+                        content=md_content,
+                        commit_message=f'[Automated] Update {database.name} Markdown documentation'
+                    )
+                    logger.info(f"    ✓ Uploaded Markdown: {md_path}")
+                    
+                    # Save locally
+                    with open(f'{local_base_path}/complete-backup.md', 'w', encoding='utf-8') as f:
+                        f.write(md_content)
+            except Exception as e:
+                logger.warning(f"    Failed to generate/upload Markdown: {e}")
 
             # Generate and upload SVG ERD diagram
             try:
@@ -234,7 +392,7 @@ class CronjobScheduler:
                 logger.info(f"    Generated SVG ERD: {len(svg_content)} bytes")
 
                 # Upload SVG file
-                erd_file_path = f'{team_name}/{db_name}-erd.svg'
+                erd_file_path = f'{github_path}/{db_name}-erd.svg'
                 github_mgr.update_file(
                     repo=repo,
                     file_path=erd_file_path,
@@ -246,17 +404,17 @@ class CronjobScheduler:
                 logger.warning(f"    Failed to generate/upload ERD: {e}")
 
             # Update database record
-            db = get_db()
-            db_obj = db.query(Database).filter(Database.id == database.id).first()
+            db_session = get_db()
+            db_obj = db_session.query(Database).filter(Database.id == database.id).first()
             db_obj.github_path = team_name
             db_obj.last_modified = datetime.utcnow()
-            db.commit()
-            db.close()
+            db_session.commit()
+            db_session.close()
 
             logger.info(f"    ✓ Synced to GitHub: {full_path}")
 
-        # Execute the synchronous operation in a thread pool
-        await loop.run_in_executor(None, sync_operation)
+        # Execute the complete sync in thread pool
+        await loop.run_in_executor(None, complete_sync)
 
     def calculate_next_run(self, job: Cronjob) -> datetime:
         """Calculate next run time for a cronjob"""
