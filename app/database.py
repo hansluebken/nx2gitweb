@@ -48,6 +48,48 @@ def init_db():
     """Initialize database - create all tables"""
     Base.metadata.create_all(bind=engine)
     print("✓ Database tables created successfully")
+    
+    # Run migrations for new columns
+    run_migrations()
+
+
+def run_migrations():
+    """Run manual migrations for new columns in existing tables"""
+    from sqlalchemy import text, inspect
+    
+    inspector = inspect(engine)
+    
+    # Migration: Add sync_status, sync_started_at, sync_error to databases table
+    if 'databases' in inspector.get_table_names():
+        columns = [col['name'] for col in inspector.get_columns('databases')]
+        
+        with engine.connect() as conn:
+            # Add sync_status column
+            if 'sync_status' not in columns:
+                print("  → Adding 'sync_status' column to databases table...")
+                conn.execute(text(
+                    "ALTER TABLE databases ADD COLUMN sync_status VARCHAR(20) DEFAULT 'idle' NOT NULL"
+                ))
+                conn.commit()
+                print("    ✓ Added sync_status column")
+            
+            # Add sync_started_at column
+            if 'sync_started_at' not in columns:
+                print("  → Adding 'sync_started_at' column to databases table...")
+                conn.execute(text(
+                    "ALTER TABLE databases ADD COLUMN sync_started_at TIMESTAMP NULL"
+                ))
+                conn.commit()
+                print("    ✓ Added sync_started_at column")
+            
+            # Add sync_error column
+            if 'sync_error' not in columns:
+                print("  → Adding 'sync_error' column to databases table...")
+                conn.execute(text(
+                    "ALTER TABLE databases ADD COLUMN sync_error TEXT NULL"
+                ))
+                conn.commit()
+                print("    ✓ Added sync_error column")
 
 
 def get_db() -> Session:

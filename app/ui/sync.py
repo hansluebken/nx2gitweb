@@ -409,9 +409,11 @@ async def generate_ai_changelog(
 
 
 
-def load_databases(user, server, team, container):
+def load_databases(user, server, team, container, setup_refresh=True):
     """Load and display databases for a team"""
     import logging
+    from ..models.database import SyncStatus
+    
     logger = logging.getLogger(__name__)
 
     container.clear()
@@ -423,6 +425,9 @@ def load_databases(user, server, team, container):
             Database.team_id == team.id
         ).order_by(Database.name).all()
         logger.info(f"Found {len(databases)} databases for team {team.name}")
+        
+        # Check if any database is syncing
+        any_syncing = any(d.sync_status == SyncStatus.SYNCING.value for d in databases)
 
         if not databases:
             with container:
@@ -437,7 +442,13 @@ def load_databases(user, server, team, container):
             with container:
                 # Bulk actions
                 with ui.row().classes('w-full items-center justify-between mb-4'):
-                    ui.label('Databases').classes('text-h6 font-bold')
+                    with ui.row().classes('items-center gap-2'):
+                        ui.label('Databases').classes('text-h6 font-bold')
+                        # Show global sync indicator if any database is syncing
+                        if any_syncing:
+                            ui.spinner(size='sm', color='primary')
+                            ui.label('Sync in progress...').classes('text-caption text-primary')
+                    
                     ui.button(
                         'Sync All',
                         icon='sync',
@@ -447,23 +458,77 @@ def load_databases(user, server, team, container):
                 # Database cards
                 for database in databases:
                     render_database_card(user, server, team, database, container)
+                
+                # Setup auto-refresh timer if any database is syncing
+                if any_syncing and setup_refresh:
+                    # Create a timer that refreshes every 3 seconds while syncing
+                    refresh_timer = ui.timer(
+                        3.0,
+                        lambda: refresh_if_syncing(user, server, team, container),
+                        once=False
+                    )
+                    # Store timer reference on container for cleanup
+                    container._refresh_timer = refresh_timer
 
     finally:
         db.close()
 
 
+def refresh_if_syncing(user, server, team, container):
+    """Refresh database list if any sync is still in progress"""
+    from ..models.database import SyncStatus
+    
+    db = get_db()
+    try:
+        # Check if any database in this team is still syncing
+        any_syncing = db.query(Database).filter(
+            Database.team_id == team.id,
+            Database.sync_status == SyncStatus.SYNCING.value
+        ).first() is not None
+        
+        if any_syncing:
+            # Still syncing, reload to update status
+            load_databases(user, server, team, container, setup_refresh=False)
+        else:
+            # No more syncing, stop the timer and do final reload
+            if hasattr(container, '_refresh_timer') and container._refresh_timer:
+                container._refresh_timer.cancel()
+                container._refresh_timer = None
+            load_databases(user, server, team, container, setup_refresh=False)
+    finally:
+        db.close()
+
+
 def render_database_card(user, server, team, database, container):
-    """Render a database card"""
-    with ui.card().classes('w-full p-4'):
+    """Render a database card with sync status indicator"""
+    from ..models.database import SyncStatus
+    
+    # Check current sync status
+    is_syncing = database.sync_status == SyncStatus.SYNCING.value
+    has_error = database.sync_status == SyncStatus.ERROR.value
+    
+    with ui.card().classes('w-full p-4') as card:
+        # Store card reference for refresh
+        card._database_id = database.id
+        
         with ui.row().classes('w-full items-start justify-between'):
             # Database info
             with ui.column().classes('flex-1 gap-2'):
                 with ui.row().classes('items-center gap-2'):
-                    ui.icon('folder', size='md').classes('text-primary')
+                    # Show spinner if syncing, otherwise folder icon
+                    if is_syncing:
+                        ui.spinner(size='sm', color='primary').classes('sync-spinner')
+                    else:
+                        ui.icon('folder', size='md').classes('text-primary')
+                    
                     ui.label(database.name).classes('text-h6 font-bold')
 
                     if database.is_excluded:
                         ui.badge('Excluded', color='warning')
+                    elif is_syncing:
+                        ui.badge('Syncing...', color='primary').props('outline')
+                    elif has_error:
+                        ui.badge('Error', color='negative')
 
                 ui.label(f'Database ID: {database.database_id}').classes('text-grey-7')
 
@@ -476,17 +541,22 @@ def render_database_card(user, server, team, database, container):
                     ui.label(f'Last Modified: {format_datetime(database.last_modified)}').classes(
                         'text-grey-7'
                     )
+                
+                # Show error message if sync failed
+                if has_error and database.sync_error:
+                    with ui.row().classes('items-center gap-1'):
+                        ui.icon('error', size='xs', color='negative')
+                        ui.label(database.sync_error[:100]).classes('text-caption text-negative')
 
             # Actions
             with ui.column().classes('gap-2'):
                 if not database.is_excluded:
+                    # Disable sync button if already syncing
                     sync_btn = ui.button(
-                        'Sync Now',
+                        'Syncing...' if is_syncing else 'Sync Now',
                         icon='sync',
-                        on_click=lambda d=database, btn=None: handle_sync_click(user, server, team, d, container, btn)
-                    ).props('flat dense color=primary')
-                    # Store reference for later
-                    sync_btn._database = database
+                        on_click=lambda d=database: handle_sync_click(user, server, team, d, container)
+                    ).props(f'flat dense color=primary {"loading disable" if is_syncing else ""}')
 
                 if database.github_path and user.github_organization:
                     # View Structure button - opens JSON viewer dialog
@@ -553,43 +623,36 @@ def render_database_card(user, server, team, database, container):
                     ).props('flat dense color=warning')
 
 
-def handle_sync_click(user, server, team, database, container, button):
-    """Handle sync button click with loading state"""
+def handle_sync_click(user, server, team, database, container):
+    """
+    Handle sync button click - starts background sync.
+    Sync continues even if user leaves the page.
+    """
     import logging
+    from ..services.background_sync import get_sync_manager
+    from ..models.database import SyncStatus
+    
     logger = logging.getLogger(__name__)
-
-    # Create progress dialog
-    with ui.dialog() as progress_dialog, ui.card().classes('p-6'):
-        with ui.column().classes('items-center gap-4').style('min-width: 300px;'):
-            ui.spinner(size='xl', color='primary')
-            status_label = ui.label(f'Syncing "{database.name}"...').classes('text-h6 text-center')
-            progress_label = ui.label('Initializing...').classes('text-grey-7 text-center')
-
-    progress_dialog.open()
-
-    # Run sync directly as button handler (not background task)
-    async def run_sync():
-        try:
-            logger.info(f"=== SYNC START === Database: {database.name}")
-
-            progress_label.text = 'Fetching from Ninox...'
-            await asyncio.sleep(0.1)
-
-            # Run the actual sync
-            await sync_database(user, server, team, database, container, progress_label)
-
-            progress_label.text = 'Complete!'
-            await asyncio.sleep(0.5)
-            progress_dialog.close()
-            Toast.success(f'Database "{database.name}" synced successfully!')
-
-        except Exception as e:
-            logger.error(f"Sync error: {e}")
-            progress_dialog.close()
-            Toast.error(f'Error: {str(e)}')
-
-    # Call async function directly (runs in UI context, not background)
-    asyncio.create_task(run_sync())
+    
+    # Get sync manager
+    sync_manager = get_sync_manager()
+    
+    # Check if already syncing
+    if sync_manager.is_syncing(database.id):
+        Toast.warning(f'Database "{database.name}" is already syncing')
+        return
+    
+    # Start background sync
+    started = sync_manager.start_sync(user, server, team, database)
+    
+    if started:
+        Toast.info(f'Sync started for "{database.name}" - runs in background')
+        logger.info(f"Background sync started for {database.name}")
+        
+        # Reload databases to show spinner
+        load_databases(user, server, team, container)
+    else:
+        Toast.warning(f'Could not start sync for "{database.name}"')
 
 
 async def sync_database(user, server, team, database, container, progress_label=None, already_syncing=None):

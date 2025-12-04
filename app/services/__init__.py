@@ -6,6 +6,10 @@ from .ai_changelog import (
     OpenAIProvider,
     GeminiProvider,
 )
+from .background_sync import (
+    BackgroundSyncManager,
+    get_sync_manager,
+)
 
 __all__ = [
     'AIChangelogService',
@@ -14,4 +18,6 @@ __all__ = [
     'ClaudeProvider',
     'OpenAIProvider',
     'GeminiProvider',
+    'BackgroundSyncManager',
+    'get_sync_manager',
 ]

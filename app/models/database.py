@@ -1,11 +1,21 @@
 """
 Database model for Ninox databases
 """
+import enum
 from datetime import datetime
 from typing import List, TYPE_CHECKING
-from sqlalchemy import String, Boolean, Integer, ForeignKey, DateTime
+from sqlalchemy import String, Boolean, Integer, ForeignKey, DateTime, Enum as SQLEnum, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base, TimestampMixin
+
+
+class SyncStatus(enum.Enum):
+    """Sync status for databases"""
+    IDLE = "idle"
+    SYNCING = "syncing"
+    SUCCESS = "success"
+    ERROR = "error"
+
 
 if TYPE_CHECKING:
     from .changelog import ChangeLog
@@ -27,6 +37,15 @@ class Database(Base, TimestampMixin):
     # Status
     is_excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_modified: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    
+    # Sync status (for background sync tracking)
+    sync_status: Mapped[str] = mapped_column(
+        String(20), 
+        default=SyncStatus.IDLE.value, 
+        nullable=False
+    )
+    sync_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     
     # Google Drive integration
     drive_document_id: Mapped[str | None] = mapped_column(String(100), nullable=True)  # Google Docs document ID
@@ -56,3 +75,8 @@ class Database(Base, TimestampMixin):
         if self.documentations:
             return self.documentations[0]
         return None
+    
+    @property
+    def is_syncing(self) -> bool:
+        """Check if database is currently syncing"""
+        return self.sync_status == SyncStatus.SYNCING.value
