@@ -49,12 +49,58 @@ class BackgroundSyncManager:
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sync_")
         self._active_syncs: Dict[int, SyncTask] = {}  # database_id -> SyncTask
         self._sync_lock = threading.Lock()
+        self._bulk_sync_active: bool = False
+        self._bulk_sync_team_id: Optional[int] = None
+        self._bulk_sync_total: int = 0
+        self._bulk_sync_completed: int = 0
         logger.info("BackgroundSyncManager initialized")
     
     def is_syncing(self, database_id: int) -> bool:
         """Check if a database is currently being synced"""
         with self._sync_lock:
             return database_id in self._active_syncs
+    
+    def is_bulk_sync_active(self, team_id: Optional[int] = None) -> bool:
+        """Check if a bulk sync is currently active, optionally for a specific team"""
+        with self._sync_lock:
+            if team_id is not None:
+                return self._bulk_sync_active and self._bulk_sync_team_id == team_id
+            return self._bulk_sync_active
+    
+    def get_bulk_sync_progress(self) -> tuple:
+        """Get bulk sync progress (completed, total)"""
+        with self._sync_lock:
+            return (self._bulk_sync_completed, self._bulk_sync_total)
+    
+    def start_bulk_sync(self, team_id: int, total_count: int):
+        """Mark the start of a bulk sync operation"""
+        with self._sync_lock:
+            self._bulk_sync_active = True
+            self._bulk_sync_team_id = team_id
+            self._bulk_sync_total = total_count
+            self._bulk_sync_completed = 0
+        logger.info(f"Bulk sync started for team {team_id} with {total_count} databases")
+    
+    def end_bulk_sync(self):
+        """Mark the end of a bulk sync operation"""
+        with self._sync_lock:
+            self._bulk_sync_active = False
+            self._bulk_sync_team_id = None
+            self._bulk_sync_total = 0
+            self._bulk_sync_completed = 0
+        logger.info("Bulk sync ended")
+    
+    def increment_bulk_sync_progress(self):
+        """Increment bulk sync completed count"""
+        with self._sync_lock:
+            self._bulk_sync_completed += 1
+            completed = self._bulk_sync_completed
+            total = self._bulk_sync_total
+            # Auto-end bulk sync when all done
+            if completed >= total and total > 0:
+                self._bulk_sync_active = False
+                self._bulk_sync_team_id = None
+                logger.info(f"Bulk sync auto-completed: {completed}/{total}")
     
     def get_active_syncs(self) -> Dict[int, SyncTask]:
         """Get all active sync tasks"""
@@ -139,6 +185,8 @@ class BackgroundSyncManager:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
+        database_name = None
+        
         try:
             # Load models fresh in this thread
             db = get_db()
@@ -150,6 +198,8 @@ class BackgroundSyncManager:
                 
                 if not all([user, server, team, database]):
                     raise ValueError("Could not load required models")
+                
+                database_name = database.name
                 
                 # Copy needed attributes (detach from session)
                 user_data = {
@@ -190,18 +240,7 @@ class BackgroundSyncManager:
                 )
             )
             
-            # Update status to success
-            db = get_db()
-            try:
-                db_obj = db.query(Database).filter(Database.id == database_id).first()
-                if db_obj:
-                    db_obj.sync_status = SyncStatus.SUCCESS.value
-                    db_obj.last_modified = datetime.utcnow()
-                    db.commit()
-            finally:
-                db.close()
-            
-            logger.info(f"Background sync completed for database ID {database_id}")
+            logger.info(f"Background sync completed for {database_name} (ID {database_id})")
             
         except Exception as e:
             logger.error(f"Background sync failed for database ID {database_id}: {e}")
@@ -220,9 +259,32 @@ class BackgroundSyncManager:
                 db.close()
         
         finally:
-            # Remove from active syncs
+            # Always update status to idle/success when done
+            db = get_db()
+            try:
+                db_obj = db.query(Database).filter(Database.id == database_id).first()
+                if db_obj and db_obj.sync_status == SyncStatus.SYNCING.value:
+                    # Only set to idle if still syncing (not error)
+                    db_obj.sync_status = SyncStatus.IDLE.value
+                    db_obj.last_modified = datetime.utcnow()
+                    db.commit()
+                    logger.info(f"Reset sync status to idle for {database_name or database_id}")
+            except Exception as e:
+                logger.error(f"Failed to reset sync status: {e}")
+            finally:
+                db.close()
+            
+            # Remove from active syncs and update bulk progress
             with self._sync_lock:
                 self._active_syncs.pop(database_id, None)
+                
+                # Update bulk sync progress if active
+                if self._bulk_sync_active:
+                    self._bulk_sync_completed += 1
+                    if self._bulk_sync_completed >= self._bulk_sync_total and self._bulk_sync_total > 0:
+                        self._bulk_sync_active = False
+                        self._bulk_sync_team_id = None
+                        logger.info(f"Bulk sync auto-completed: {self._bulk_sync_completed}/{self._bulk_sync_total}")
             
             loop.close()
     
@@ -360,11 +422,13 @@ class BackgroundSyncManager:
             description=f"Ninox database backups from {server_data['name']} ({server_data['url']})"
         )
         
-        # Create paths
+        # Create paths - new structure:
+        # - team-name/db-name.md (MD directly visible under team)
+        # - team-name/db-name/structure.json (details in subfolder)
         team_name = sanitize_name(team_data['name'])
         db_name = sanitize_name(database_name)
         server_name = sanitize_name(server_data['name'])
-        github_path = team_name
+        github_path = f'{team_name}/{db_name}'  # Subfolder for details
         
         # Create complete backup
         complete_backup = {
@@ -385,8 +449,8 @@ class BackgroundSyncManager:
         structure_json = json.dumps(db_structure, indent=2, ensure_ascii=False)
         backup_json = json.dumps(complete_backup, indent=2, ensure_ascii=False)
         
-        # Upload structure
-        full_path = f'{github_path}/{db_name}-structure.json'
+        # Upload structure (into subfolder)
+        full_path = f'{github_path}/structure.json'
         await loop.run_in_executor(
             None,
             github_mgr.update_file,
@@ -396,8 +460,8 @@ class BackgroundSyncManager:
             f'Update {database_name} structure from {team_data["name"]}'
         )
         
-        # Upload complete backup
-        backup_path = f'{github_path}/{db_name}-complete-backup.json'
+        # Upload complete backup (into subfolder)
+        backup_path = f'{github_path}/complete-backup.json'
         await loop.run_in_executor(
             None,
             github_mgr.update_file,
@@ -443,11 +507,11 @@ class BackgroundSyncManager:
                             except Exception:
                                 pass
         
-        # Generate and upload Markdown
+        # Generate and upload Markdown (directly under team folder, not in subfolder)
         try:
             md_content = generate_markdown_from_backup(complete_backup, database_name, external_db_structures)
             if md_content:
-                md_path = f'{github_path}/{db_name}-complete-backup.md'
+                md_path = f'{team_name}/{db_name}.md'  # MD directly visible under team
                 await loop.run_in_executor(
                     None,
                     github_mgr.update_file,
@@ -462,11 +526,11 @@ class BackgroundSyncManager:
         except Exception as e:
             logger.warning(f"Failed to generate Markdown: {e}")
         
-        # Generate and upload SVG ERD
+        # Generate and upload SVG ERD (into subfolder)
         try:
             svg_content = generate_svg_erd(db_structure)
             if svg_content:
-                erd_path = f'{github_path}/{db_name}-erd.svg'
+                erd_path = f'{github_path}/erd.svg'
                 await loop.run_in_executor(
                     None,
                     github_mgr.update_file,

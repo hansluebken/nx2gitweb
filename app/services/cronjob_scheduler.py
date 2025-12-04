@@ -272,12 +272,14 @@ class CronjobScheduler:
                 description=f'Ninox database backups from {server.name} ({server.url})'
             )
 
-            # Create path: team/dbname-structure.json
+            # Create path structure:
+            # - team-name/db-name.md (MD directly visible under team)
+            # - team-name/db-name/structure.json (details in subfolder)
             team_name = sanitize_name(team.name)
             db_name = sanitize_name(database.name)
             server_name = sanitize_name(server.name)
-            github_path = team_name
-            full_path = f'{github_path}/{db_name}-structure.json'
+            github_path = f'{team_name}/{db_name}'  # Subfolder for details
+            full_path = f'{github_path}/structure.json'
             
             # Fetch views and reports
             views_data = []
@@ -322,8 +324,8 @@ class CronjobScheduler:
                 commit_message=f'[Automated] Update {database.name} structure from {team.name}'
             )
             
-            # Upload complete backup
-            backup_path = f'{github_path}/{db_name}-complete-backup.json'
+            # Upload complete backup (into subfolder)
+            backup_path = f'{github_path}/complete-backup.json'
             github_mgr.update_file(
                 repo=repo,
                 file_path=backup_path,
@@ -367,11 +369,11 @@ class CronjobScheduler:
                                 except Exception:
                                     pass
             
-            # Generate and upload Markdown documentation
+            # Generate and upload Markdown documentation (directly under team folder)
             try:
                 md_content = generate_markdown_from_backup(complete_backup, database.name, external_db_structures)
                 if md_content:
-                    md_path = f'{github_path}/{db_name}-complete-backup.md'
+                    md_path = f'{team_name}/{db_name}.md'  # MD directly visible under team
                     github_mgr.update_file(
                         repo=repo,
                         file_path=md_path,
@@ -386,13 +388,13 @@ class CronjobScheduler:
             except Exception as e:
                 logger.warning(f"    Failed to generate/upload Markdown: {e}")
 
-            # Generate and upload SVG ERD diagram
+            # Generate and upload SVG ERD diagram (into subfolder)
             try:
                 svg_content = generate_svg_erd(db_structure)
                 logger.info(f"    Generated SVG ERD: {len(svg_content)} bytes")
 
                 # Upload SVG file
-                erd_file_path = f'{github_path}/{db_name}-erd.svg'
+                erd_file_path = f'{github_path}/erd.svg'
                 github_mgr.update_file(
                     repo=repo,
                     file_path=erd_file_path,
@@ -406,7 +408,7 @@ class CronjobScheduler:
             # Update database record
             db_session = get_db()
             db_obj = db_session.query(Database).filter(Database.id == database.id).first()
-            db_obj.github_path = team_name
+            db_obj.github_path = github_path  # Now includes db subfolder: team-name/db-name
             db_obj.last_modified = datetime.utcnow()
             db_session.commit()
             db_session.close()

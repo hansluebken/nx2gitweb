@@ -413,10 +413,16 @@ def load_databases(user, server, team, container, setup_refresh=True):
     """Load and display databases for a team"""
     import logging
     from ..models.database import SyncStatus
+    from ..services.background_sync import get_sync_manager
     
     logger = logging.getLogger(__name__)
 
     container.clear()
+    
+    # Get sync manager for bulk sync status
+    sync_manager = get_sync_manager()
+    bulk_sync_active = sync_manager.is_bulk_sync_active(team.id)
+    bulk_progress = sync_manager.get_bulk_sync_progress()
 
     db = get_db()
     try:
@@ -444,23 +450,28 @@ def load_databases(user, server, team, container, setup_refresh=True):
                 with ui.row().classes('w-full items-center justify-between mb-4'):
                     with ui.row().classes('items-center gap-2'):
                         ui.label('Databases').classes('text-h6 font-bold')
-                        # Show global sync indicator if any database is syncing
-                        if any_syncing:
+                        # Show bulk sync progress indicator
+                        if bulk_sync_active:
+                            ui.spinner(size='sm', color='primary')
+                            completed, total = bulk_progress
+                            ui.label(f'Bulk sync: {completed}/{total}').classes('text-caption text-primary font-bold')
+                        elif any_syncing:
                             ui.spinner(size='sm', color='primary')
                             ui.label('Sync in progress...').classes('text-caption text-primary')
                     
-                    ui.button(
-                        'Sync All',
+                    # Disable Sync All button during bulk sync
+                    sync_all_btn = ui.button(
+                        'Syncing...' if bulk_sync_active else 'Sync All',
                         icon='sync',
-                        on_click=lambda: sync_all_databases(user, server, team, databases)
-                    ).props('color=primary')
+                        on_click=lambda: sync_all_databases(user, server, team, databases, container)
+                    ).props(f'color=primary {"loading disable" if bulk_sync_active else ""}')
 
                 # Database cards
                 for database in databases:
-                    render_database_card(user, server, team, database, container)
+                    render_database_card(user, server, team, database, container, bulk_sync_active)
                 
-                # Setup auto-refresh timer if any database is syncing
-                if any_syncing and setup_refresh:
+                # Setup auto-refresh timer if any database is syncing or bulk sync active
+                if (any_syncing or bulk_sync_active) and setup_refresh:
                     # Create a timer that refreshes every 3 seconds while syncing
                     refresh_timer = ui.timer(
                         3.0,
@@ -477,6 +488,10 @@ def load_databases(user, server, team, container, setup_refresh=True):
 def refresh_if_syncing(user, server, team, container):
     """Refresh database list if any sync is still in progress"""
     from ..models.database import SyncStatus
+    from ..services.background_sync import get_sync_manager
+    
+    sync_manager = get_sync_manager()
+    bulk_sync_active = sync_manager.is_bulk_sync_active(team.id)
     
     db = get_db()
     try:
@@ -486,7 +501,7 @@ def refresh_if_syncing(user, server, team, container):
             Database.sync_status == SyncStatus.SYNCING.value
         ).first() is not None
         
-        if any_syncing:
+        if any_syncing or bulk_sync_active:
             # Still syncing, reload to update status
             load_databases(user, server, team, container, setup_refresh=False)
         else:
@@ -499,13 +514,16 @@ def refresh_if_syncing(user, server, team, container):
         db.close()
 
 
-def render_database_card(user, server, team, database, container):
+def render_database_card(user, server, team, database, container, bulk_sync_active=False):
     """Render a database card with sync status indicator"""
     from ..models.database import SyncStatus
     
     # Check current sync status
     is_syncing = database.sync_status == SyncStatus.SYNCING.value
     has_error = database.sync_status == SyncStatus.ERROR.value
+    
+    # Disable individual sync during bulk sync
+    sync_disabled = bulk_sync_active or is_syncing
     
     with ui.card().classes('w-full p-4') as card:
         # Store card reference for refresh
@@ -551,12 +569,13 @@ def render_database_card(user, server, team, database, container):
             # Actions
             with ui.column().classes('gap-2'):
                 if not database.is_excluded:
-                    # Disable sync button if already syncing
+                    # Disable sync button if already syncing or bulk sync active
+                    btn_label = 'Syncing...' if is_syncing else ('Waiting...' if bulk_sync_active else 'Sync Now')
                     sync_btn = ui.button(
-                        'Syncing...' if is_syncing else 'Sync Now',
+                        btn_label,
                         icon='sync',
                         on_click=lambda d=database: handle_sync_click(user, server, team, d, container)
-                    ).props(f'flat dense color=primary {"loading disable" if is_syncing else ""}')
+                    ).props(f'flat dense color=primary {"loading disable" if sync_disabled else ""}')
 
                 if database.github_path and user.github_organization:
                     # View Structure button - opens JSON viewer dialog
@@ -627,6 +646,7 @@ def handle_sync_click(user, server, team, database, container):
     """
     Handle sync button click - starts background sync.
     Sync continues even if user leaves the page.
+    Blocked if bulk sync is active for this team.
     """
     import logging
     from ..services.background_sync import get_sync_manager
@@ -636,6 +656,11 @@ def handle_sync_click(user, server, team, database, container):
     
     # Get sync manager
     sync_manager = get_sync_manager()
+    
+    # Check if bulk sync is active for this team
+    if sync_manager.is_bulk_sync_active(team.id):
+        Toast.warning('Bulk sync in progress - please wait until it completes')
+        return
     
     # Check if already syncing
     if sync_manager.is_syncing(database.id):
@@ -864,13 +889,14 @@ async def sync_database(user, server, team, database, container, progress_label=
             )
             logger.info(f"Repository ready: {repo_name}")
 
-            # Create path: team/dbname-structure.json (NO server folder, since repo = server)
+            # Create path structure:
+            # - team-name/db-name.md (MD directly visible under team)
+            # - team-name/db-name/structure.json (details in subfolder)
             team_name = sanitize_name(team.name)
             db_name = sanitize_name(database.name)
 
-            github_path = team_name  # Just the team folder
-            file_name = f'{db_name}-structure.json'
-            full_path = f'{github_path}/{file_name}'
+            github_path = f'{team_name}/{db_name}'  # Subfolder for details
+            full_path = f'{github_path}/structure.json'
 
             # Step 5: Convert to JSON and create complete backup object
             if progress_label:
@@ -915,13 +941,13 @@ async def sync_database(user, server, team, database, container, progress_label=
             )
             logger.info(f"Uploaded to GitHub: {full_path}")
 
-            # Step 6b: Upload Views if available
+            # Step 6b: Upload Views if available (into subfolder)
             if views_data:
                 if progress_label:
                     progress_label.text = 'Uploading views...'
                     await asyncio.sleep(0.1)
 
-                views_path = f'{github_path}/{db_name}-views.json'
+                views_path = f'{github_path}/views.json'
                 views_json = json.dumps(views_data, indent=2, ensure_ascii=False)
                 
                 try:
@@ -937,13 +963,13 @@ async def sync_database(user, server, team, database, container, progress_label=
                 except Exception as e:
                     logger.error(f"Failed to upload views: {e}")
 
-            # Step 6c: Upload Reports if available
+            # Step 6c: Upload Reports if available (into subfolder)
             if reports_data:
                 if progress_label:
                     progress_label.text = 'Uploading reports...'
                     await asyncio.sleep(0.1)
 
-                reports_path = f'{github_path}/{db_name}-reports.json'
+                reports_path = f'{github_path}/reports.json'
                 reports_json = json.dumps(reports_data, indent=2, ensure_ascii=False)
                 
                 try:
@@ -959,12 +985,12 @@ async def sync_database(user, server, team, database, container, progress_label=
                 except Exception as e:
                     logger.error(f"Failed to upload reports: {e}")
 
-            # Step 6d: Upload complete backup JSON
+            # Step 6d: Upload complete backup JSON (into subfolder)
             if progress_label:
                 progress_label.text = 'Uploading complete backup...'
                 await asyncio.sleep(0.1)
 
-            backup_path = f'{github_path}/{db_name}-complete-backup.json'
+            backup_path = f'{github_path}/complete-backup.json'
             backup_json = json.dumps(complete_backup, indent=2, ensure_ascii=False)
             
             try:
@@ -1042,8 +1068,9 @@ async def sync_database(user, server, team, database, container, progress_label=
                 if md_content:
                     logger.info(f"Generated Markdown: {len(md_content)} bytes")
                     
-                    # Upload Markdown file
-                    md_path = f'{github_path}/{db_name}-complete-backup.md'
+                    # Upload Markdown file DIRECTLY under team folder (not in subfolder)
+                    # This makes the MD file more visible in the GitHub tree
+                    md_path = f'{team_name}/{db_name}.md'
                     
                     if progress_label:
                         progress_label.text = 'Uploading Markdown documentation...'
@@ -1083,8 +1110,8 @@ async def sync_database(user, server, team, database, container, progress_label=
 
                 logger.info(f"Generated SVG ERD: {len(svg_content)} bytes")
 
-                # Upload SVG file
-                erd_file_path = f'{github_path}/{db_name}-erd.svg'
+                # Upload SVG file (into subfolder)
+                erd_file_path = f'{github_path}/erd.svg'
 
                 if progress_label:
                     progress_label.text = 'Uploading ERD diagram...'
@@ -1288,11 +1315,24 @@ async def sync_database(user, server, team, database, container, progress_label=
         raise  # Re-raise to be caught by caller
 
 
-def sync_all_databases(user, server, team, databases):
-    """Sync all non-excluded databases with progress dialog"""
+def sync_all_databases(user, server, team, databases, container=None):
+    """
+    Sync all non-excluded databases using background sync manager.
+    Syncs continue even if user leaves the page.
+    Blocks individual syncs while bulk sync is active.
+    """
     import logging
-    from nicegui import background_tasks
+    from ..services.background_sync import get_sync_manager
+    
     logger = logging.getLogger(__name__)
+
+    # Get sync manager
+    sync_manager = get_sync_manager()
+    
+    # Check if bulk sync is already running for this team
+    if sync_manager.is_bulk_sync_active(team.id):
+        Toast.warning('Bulk sync already in progress for this team')
+        return
 
     # Filter non-excluded databases
     databases_to_sync = [db for db in databases if not db.is_excluded]
@@ -1302,58 +1342,39 @@ def sync_all_databases(user, server, team, databases):
         Toast.warning('No databases to sync (all are excluded)')
         return
 
-    # Create progress dialog
-    with ui.dialog() as progress_dialog, ui.card().classes('p-6'):
-        with ui.column().classes('items-center gap-4').style('min-width: 400px;'):
-            ui.spinner(size='xl', color='primary')
-            status_label = ui.label(f'Syncing {total_count} databases...').classes('text-h6 text-center')
-            progress_label = ui.label('Starting...').classes('text-grey-7 text-center')
-            progress_bar = ui.linear_progress(value=0, show_value=True).props('size=20px color=primary')
-
-    progress_dialog.open()
-
-    # Run as background task with proper UI context
-    async def run_sync_all():
-        try:
-            success_count = 0
-            error_count = 0
-
-            for idx, database in enumerate(databases_to_sync, 1):
-                try:
-                    logger.info(f"Syncing {idx}/{total_count}: {database.name}")
-
-                    # Update progress
-                    status_label.text = f'Syncing {idx}/{total_count}: {database.name}'
-                    progress_bar.value = (idx - 1) / total_count
-                    await asyncio.sleep(0.1)
-
-                    # Sync the database (pass progress_label to suppress individual toasts)
-                    await sync_database(user, server, team, database, None, progress_label)
-
-                    success_count += 1
-
-                except Exception as e:
-                    error_count += 1
-                    logger.error(f"✗ Error syncing {database.name}: {e}")
-
-            # Final progress
-            progress_bar.value = 1.0
-            progress_label.text = f'Completed: {success_count} success, {error_count} errors'
-            await asyncio.sleep(1.5)
-            progress_dialog.close()
-
-            # Log result (no Toast in background task)
-            if error_count > 0:
-                logger.warning(f'Synced {success_count}/{total_count} databases. {error_count} errors.')
+    # Start bulk sync mode
+    sync_manager.start_bulk_sync(team.id, total_count)
+    
+    # Start background syncs for all databases
+    started_count = 0
+    skipped_count = 0
+    
+    for database in databases_to_sync:
+        if sync_manager.is_syncing(database.id):
+            skipped_count += 1
+            logger.info(f"Skipping {database.name} - already syncing")
+        else:
+            started = sync_manager.start_sync(user, server, team, database)
+            if started:
+                started_count += 1
+                logger.info(f"Started background sync for {database.name}")
             else:
-                logger.info(f'Successfully synced all {success_count} databases!')
-
-        except Exception as e:
-            logger.error(f"Bulk sync error: {e}")
-            progress_dialog.close()
-
-    # Use background_tasks.create to maintain UI context
-    background_tasks.create(run_sync_all())
+                skipped_count += 1
+    
+    # Show result
+    if started_count > 0:
+        Toast.info(f'Started bulk sync for {started_count} databases - runs in background')
+    
+    if skipped_count > 0:
+        Toast.warning(f'{skipped_count} databases already syncing')
+    
+    # If no syncs started, end bulk sync mode
+    if started_count == 0:
+        sync_manager.end_bulk_sync()
+    
+    # Reload to show spinners
+    if container:
+        load_databases(user, server, team, container)
 
 
 def toggle_database_exclusion(user, database, is_excluded, container):

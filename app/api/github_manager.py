@@ -174,9 +174,11 @@ class GitHubManager:
             raise
     
     def update_file(self, repo, file_path: str, content: str, 
-                   commit_message: str, branch: str = "main"):
+                   commit_message: str, branch: str = "main",
+                   max_retries: int = 3):
         """
-        Erstellt oder aktualisiert eine Datei im Repository
+        Erstellt oder aktualisiert eine Datei im Repository.
+        Bei SHA-Konflikten (409) wird automatisch der aktuelle SHA geholt und erneut versucht.
         
         Args:
             repo: Repository Objekt
@@ -184,40 +186,66 @@ class GitHubManager:
             content: Neuer Dateiinhalt
             commit_message: Commit-Nachricht
             branch: Branch Name (default: main)
+            max_retries: Maximale Anzahl Versuche bei SHA-Konflikten (default: 3)
         
         Returns:
             ContentFile Objekt
         """
-        try:
-            # Versuche existierende Datei zu holen
-            existing_file = repo.get_contents(file_path, ref=branch)
-            if isinstance(existing_file, list):
-                # Sollte nicht passieren für einzelne Dateien
-                raise ValueError(f"Pfad {file_path} ist ein Verzeichnis")
-            
-            # Datei existiert, aktualisiere sie
-            result = repo.update_file(
-                path=file_path,
-                message=commit_message,
-                content=content,
-                sha=existing_file.sha,
-                branch=branch
-            )
-            print(f"    ✓ Aktualisiert: {file_path}")
-            return result['content']
-            
-        except GithubException as e:
-            if e.status == 404:
-                # Datei existiert nicht, erstelle sie
-                result = repo.create_file(
+        import time
+        
+        for attempt in range(max_retries):
+            try:
+                # Versuche existierende Datei zu holen
+                existing_file = repo.get_contents(file_path, ref=branch)
+                if isinstance(existing_file, list):
+                    # Sollte nicht passieren für einzelne Dateien
+                    raise ValueError(f"Pfad {file_path} ist ein Verzeichnis")
+                
+                # Datei existiert, aktualisiere sie
+                result = repo.update_file(
                     path=file_path,
                     message=commit_message,
                     content=content,
+                    sha=existing_file.sha,
                     branch=branch
                 )
-                print(f"    ✓ Erstellt: {file_path}")
+                print(f"    ✓ Aktualisiert: {file_path}")
                 return result['content']
-            raise
+                
+            except GithubException as e:
+                if e.status == 404:
+                    # Datei existiert nicht, erstelle sie
+                    try:
+                        result = repo.create_file(
+                            path=file_path,
+                            message=commit_message,
+                            content=content,
+                            branch=branch
+                        )
+                        print(f"    ✓ Erstellt: {file_path}")
+                        return result['content']
+                    except GithubException as create_error:
+                        # File was created by another process between get_contents and create_file
+                        if create_error.status == 422 and attempt < max_retries - 1:
+                            print(f"    ⟳ Retry {attempt + 1}/{max_retries} (file created by another process): {file_path}")
+                            time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                            continue
+                        raise
+                
+                elif e.status == 409:
+                    # SHA conflict - file was modified by another process
+                    if attempt < max_retries - 1:
+                        print(f"    ⟳ Retry {attempt + 1}/{max_retries} (SHA conflict): {file_path}")
+                        time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                        continue
+                    else:
+                        print(f"    ✗ SHA conflict nach {max_retries} Versuchen: {file_path}")
+                        raise
+                else:
+                    raise
+        
+        # Should not reach here, but just in case
+        raise Exception(f"Failed to update {file_path} after {max_retries} attempts")
     
     def delete_file(self, repo, file_path: str, commit_message: str) -> None:
         """
