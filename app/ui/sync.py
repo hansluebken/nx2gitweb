@@ -16,6 +16,7 @@ from ..utils.encryption import get_encryption_manager
 from ..utils.github_utils import sanitize_name, get_repo_name_from_server
 from ..utils.svg_erd_generator import generate_svg_erd
 from ..utils.ninox_code_extractor import extract_and_generate as extract_ninox_code
+from ..utils.ninox_md_generator import generate_markdown_from_backup
 from ..api.ninox_client import NinoxClient
 from ..api.github_manager import GitHubManager
 from .components import (
@@ -839,6 +840,44 @@ async def sync_database(user, server, team, database, container, progress_label=
             except Exception as e:
                 logger.error(f"Failed to upload complete backup: {e}")
 
+            # Step 6d-2: Generate and upload Markdown documentation
+            if progress_label:
+                progress_label.text = 'Generating Markdown documentation...'
+                await asyncio.sleep(0.1)
+
+            try:
+                # Generate Markdown from complete backup
+                logger.info(f"Generating Markdown documentation for {database.name}...")
+                md_content = generate_markdown_from_backup(complete_backup, database.name)
+                
+                if md_content:
+                    logger.info(f"Generated Markdown: {len(md_content)} bytes")
+                    
+                    # Upload Markdown file
+                    md_path = f'{github_path}/{db_name}-complete-backup.md'
+                    
+                    if progress_label:
+                        progress_label.text = 'Uploading Markdown documentation...'
+                        await asyncio.sleep(0.1)
+                    
+                    await loop.run_in_executor(
+                        None,
+                        github_mgr.update_file,
+                        repo,
+                        md_path,
+                        md_content,
+                        f'Update {database.name} Markdown documentation'
+                    )
+                    logger.info(f"Uploaded Markdown to GitHub: {md_path}")
+                else:
+                    logger.warning(f"Markdown generation returned empty for {database.name}")
+                    
+            except Exception as e:
+                logger.error(f"Failed to generate/upload Markdown for {database.name}: {e}")
+                import traceback
+                logger.error(f"Markdown error traceback:\n{traceback.format_exc()}")
+                # Don't fail the whole sync if Markdown generation fails
+
             # Step 6e: Generate and upload SVG ERD diagram
             if progress_label:
                 progress_label.text = 'Generating ERD diagram...'
@@ -905,6 +944,17 @@ async def sync_database(user, server, team, database, container, progress_label=
                 with open(backup_local_path, 'w', encoding='utf-8') as f:
                     json.dump(complete_backup, f, indent=2, ensure_ascii=False)
                 logger.info(f"Saved complete-backup.json to {backup_local_path}")
+                
+                # Save complete-backup.md locally (Markdown documentation)
+                try:
+                    md_local_content = generate_markdown_from_backup(complete_backup, database.name)
+                    if md_local_content:
+                        md_local_path = f'{local_base_path}/complete-backup.md'
+                        with open(md_local_path, 'w', encoding='utf-8') as f:
+                            f.write(md_local_content)
+                        logger.info(f"Saved complete-backup.md to {md_local_path}")
+                except Exception as md_err:
+                    logger.error(f"Failed to save local Markdown: {md_err}")
                 
                 # Save reports.json separately for easier access
                 if reports_data:
