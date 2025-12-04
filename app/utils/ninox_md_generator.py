@@ -330,16 +330,28 @@ def _get_relation_info(field_data: Dict[str, Any], table_map: Dict[str, str],
     else:
         target_str = f"`{target_table_name}`"
     
+    # Determine cardinality
+    # ref = n:1 (this record points to ONE target record)
+    # rev = 1:n (this record has MANY related records)
+    cardinality = "n:1" if base == "ref" else "1:n"
+    
     # Check if external
     ext_id = field_data.get("dbId", "")
     if ext_id:
         db_name = ext_db_map.get(ext_id, ext_id)
-        return f"🔗 **EXTERN** zu {target_str} in DB `{db_name}`"
+        return f"🔗 **EXTERN** [{cardinality}] → {target_str} in DB `{db_name}`"
     
-    rel_type = "Verknüpfung" if base == "ref" else "Rückverknüpfung"
+    # Build relation type string
+    if base == "ref":
+        rel_type = "Verknüpfung"
+        arrow = "→"
+    else:
+        rel_type = "Rückverknüpfung"
+        arrow = "←"
+    
     comp = " (Komposition)" if field_data.get("cascade") else ""
     
-    return f"🔗 {rel_type} zu {target_str}{comp}"
+    return f"🔗 {rel_type} [{cardinality}] {arrow} {target_str}{comp}"
 
 
 def _extract_table_triggers(type_data: Dict[str, Any]) -> List[Tuple[str, str]]:
