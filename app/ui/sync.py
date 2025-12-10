@@ -2906,7 +2906,9 @@ def generate_documentation_for_database(database: Database, user, server: Server
                     logger.info(f"✓ Scripts saved for {database.name}")
 
                     # Commit to git (both docs and scripts)
-                    server_path = db_path.parent.parent.parent
+                    # db_path = /ninox-cli/{server}/{team}/{database}
+                    # server_path = /ninox-cli/{server}/ (Git repo root)
+                    server_path = db_path.parent.parent
                     commit_changes(server_path, f"Update documentation and scripts for {yaml_db.name}")
 
                     logger.info(f"✓ Documentation and scripts saved for {database.name}")
