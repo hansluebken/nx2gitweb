@@ -1,0 +1,7 @@
+# Optional: Falls .claude/ nicht ins Git soll
+# Entfernen Sie das # um zu aktivieren:
+# .claude/
+
+# Aber behalten Sie instructions.md für Team-Zusammenarbeit:
+# !.claude/instructions.md
+# !.claude/README.md

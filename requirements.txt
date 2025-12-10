@@ -34,13 +34,16 @@ pydantic-settings>=2.1.0
 # Utilities
 python-dateutil>=2.8.2
 
+# YAML Parsing (for ninox-dev-cli integration)
+pyyaml>=6.0
+
 # ERD/Diagram Generation
 graphviz>=0.20.1
 
 # AI Providers for Changelog Analysis
 anthropic>=0.18.0          # Claude (Anthropic)
 openai>=1.12.0             # OpenAI GPT
-google-generativeai>=0.4.0 # Google Gemini
+google-generativeai>=0.8.3 # Google Gemini
 
 # Development & Testing
 pytest>=7.4.3

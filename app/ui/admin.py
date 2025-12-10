@@ -10,6 +10,7 @@ from ..models.team import Team
 from ..models.database import Database
 from ..models.audit_log import AuditLog
 from ..models.ai_config import AIConfig, AIProvider, AVAILABLE_MODELS, DEFAULT_MODELS
+from ..models.bookstack_config import BookstackConfig
 from ..auth import (
     register_user, activate_user, deactivate_user, create_audit_log,
     UserExistsError
@@ -44,6 +45,9 @@ def render(user):
             users_tab = ui.tab('Users', icon='people')
             oauth_tab = ui.tab('OAuth', icon='login')
             ai_tab = ui.tab('KI-Konfiguration', icon='psychology')
+            prompts_tab = ui.tab('Prompt-Verwaltung', icon='edit_note')
+            bookstack_tab = ui.tab('BookStack', icon='menu_book')
+            ninox_docs_tab = ui.tab('Ninox Docs', icon='auto_stories')
             smtp_tab = ui.tab('SMTP Config', icon='email')
             audit_tab = ui.tab('Audit Logs', icon='receipt_long')
             stats_tab = ui.tab('Statistics', icon='analytics')
@@ -64,6 +68,18 @@ def render(user):
             # AI Configuration panel
             with ui.tab_panel(ai_tab):
                 render_ai_config(user)
+
+            # Prompt Management panel
+            with ui.tab_panel(prompts_tab):
+                render_prompt_management(user)
+
+            # BookStack panel
+            with ui.tab_panel(bookstack_tab):
+                render_bookstack_config(user)
+
+            # Ninox Docs panel
+            with ui.tab_panel(ninox_docs_tab):
+                render_ninox_docs(user)
 
             # SMTP Configuration panel
             with ui.tab_panel(smtp_tab):
@@ -545,7 +561,28 @@ def show_provider_config_dialog(config: AIConfig, user, reload_callback):
             options=model_options,
             value=config.model if config.model in model_options else (model_options[0] if model_options else '')
         ).classes('w-full mb-4')
-        
+
+        # Prompt template selection (for documentation)
+        from ..models.prompt_template import PromptTemplate, PromptType
+        db_temp = get_db()
+        try:
+            doc_prompts = db_temp.query(PromptTemplate).filter(
+                PromptTemplate.prompt_type == PromptType.DOCUMENTATION.value,
+                PromptTemplate.is_active == True
+            ).all()
+
+            prompt_options = {p.id: f"{p.name} {'[Standard]' if p.is_default else ''}" for p in doc_prompts}
+            prompt_options[0] = "Standard-Prompt (automatisch)"
+
+            prompt_select = ui.select(
+                label='Dokumentations-Prompt',
+                options=prompt_options,
+                value=config.doc_prompt_template_id if config.doc_prompt_template_id else 0
+            ).classes('w-full mb-4')
+            ui.label('Wählen Sie einen Prompt für die Doku-Generierung oder lassen Sie es auf Standard').classes('text-xs text-grey-6')
+        finally:
+            db_temp.close()
+
         # Advanced settings
         with ui.expansion('Erweiterte Einstellungen', icon='tune').classes('w-full mb-4'):
             with ui.column().classes('w-full gap-2 p-2'):
@@ -553,9 +590,10 @@ def show_provider_config_dialog(config: AIConfig, user, reload_callback):
                     label='Max Tokens',
                     value=config.max_tokens,
                     min=100,
-                    max=4000,
-                    step=100
+                    max=128000,  # Gemini 3 Pro supports up to 65K, but allow higher for future models
+                    step=1000
                 ).classes('w-full')
+                ui.label('Empfohlen: 16000-32000 für Dokumentation').classes('text-xs text-grey-6')
                 
                 temperature_input = ui.number(
                     label='Temperature',
@@ -581,17 +619,18 @@ def show_provider_config_dialog(config: AIConfig, user, reload_callback):
             max_tokens = int(max_tokens_input.value) if max_tokens_input.value else 1000
             temperature = float(temperature_input.value) if temperature_input.value else 0.3
             is_active = is_active_switch.value
-            
+            prompt_template_id = prompt_select.value if prompt_select.value != 0 else None
+
             if not api_key:
                 error_label.text = 'Bitte geben Sie einen API-Key ein'
                 error_label.visible = True
                 return
-            
+
             if not model:
                 error_label.text = 'Bitte wählen Sie ein Modell aus'
                 error_label.visible = True
                 return
-            
+
             db = get_db()
             try:
                 # Reload config to avoid stale data
@@ -600,18 +639,19 @@ def show_provider_config_dialog(config: AIConfig, user, reload_callback):
                     error_label.text = 'Konfiguration nicht gefunden'
                     error_label.visible = True
                     return
-                
+
                 # Encrypt and save API key
                 db_config.api_key_encrypted = encryption.encrypt(api_key)
                 db_config.model = model
                 db_config.max_tokens = max_tokens
                 db_config.temperature = temperature
                 db_config.is_active = is_active
+                db_config.doc_prompt_template_id = prompt_template_id
                 db_config.last_test_success = None  # Reset test status
                 db_config.last_test_at = None
-                
+
                 db.commit()
-                
+
                 Toast.success(f'{config.display_name} wurde konfiguriert')
                 dialog.close()
                 reload_callback()
@@ -799,6 +839,262 @@ def set_default_provider(config: AIConfig, reload_callback):
         db.close()
     
     reload_callback()
+
+
+def render_ninox_docs(user):
+    """Render Ninox Documentation scraper panel"""
+    from ..services.ninox_docs_service import get_ninox_docs_service, ScrapeProgress
+    from ..utils.encryption import get_encryption_manager
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    
+    encryption = get_encryption_manager()
+    service = get_ninox_docs_service()
+    
+    with ui.column().classes('w-full gap-4'):
+        ui.label('Ninox Dokumentation').classes('text-h5 font-bold')
+        ui.label(
+            'Laden Sie die komplette Ninox-Dokumentation (Funktionen + API) vom Ninox Forum herunter '
+            'und speichern Sie sie in einem GitHub Repository für die Claude AI Integration.'
+        ).classes('text-grey-7 mb-4')
+        
+        # Info card
+        with ui.card().classes('w-full p-4 bg-blue-50'):
+            with ui.row().classes('items-center gap-3'):
+                ui.icon('info', size='md', color='primary')
+                with ui.column().classes('gap-1'):
+                    ui.label(f'Verfügbare Dokumentation: {service.get_function_count()} Funktionen + {service.get_api_doc_count()} API-Artikel + {service.get_print_doc_count()} Drucken-Artikel').classes('font-bold')
+                    ui.label('Die Dokumentation wird vom forum.ninox.de geladen und als 3 separate Markdown-Dateien erstellt.').classes('text-sm')
+        
+        ui.separator().classes('my-4')
+        
+        # GitHub Settings Info
+        db = get_db()
+        try:
+            db_user = db.query(User).filter(User.id == user.id).first()
+            has_github = db_user and db_user.github_token_encrypted
+            github_org = db_user.github_organization if db_user else None
+        finally:
+            db.close()
+        
+        if not has_github:
+            with ui.card().classes('w-full p-4 bg-amber-50'):
+                with ui.row().classes('items-center gap-3'):
+                    ui.icon('warning', size='md', color='warning')
+                    with ui.column().classes('gap-1'):
+                        ui.label('GitHub nicht konfiguriert').classes('font-bold text-amber-800')
+                        ui.label('Bitte konfigurieren Sie zuerst Ihren GitHub Token im Profil, um die Dokumentation hochladen zu können.').classes('text-sm text-amber-700')
+                        ui.button(
+                            'Zum Profil',
+                            icon='person',
+                            on_click=lambda: ui.navigate.to('/profile')
+                        ).props('flat color=warning').classes('mt-2')
+        else:
+            with ui.card().classes('w-full p-4 bg-green-50'):
+                with ui.row().classes('items-center gap-3'):
+                    ui.icon('check_circle', size='md', color='positive')
+                    with ui.column().classes('gap-1'):
+                        ui.label('GitHub konfiguriert').classes('font-bold text-green-800')
+                        org_text = f"Organisation: {github_org}" if github_org else "Persönliches Repository"
+                        ui.label(f'{org_text} | Repository: ninox-docs').classes('text-sm text-green-700')
+        
+        ui.separator().classes('my-4')
+        
+        # Progress container
+        progress_container = ui.column().classes('w-full gap-2')
+        progress_container.visible = False
+        
+        # Result container
+        result_container = ui.column().classes('w-full gap-2 mt-4')
+        
+        # Store for scraped data
+        scraped_data = {'docs': None}
+        
+        async def run_scraper():
+            """Run the documentation scraper"""
+            progress_container.visible = True
+            progress_container.clear()
+            result_container.clear()
+            
+            # Disable button
+            scrape_button.disable()
+            
+            with progress_container:
+                progress_label = ui.label('Starte Download...').classes('font-bold')
+                progress_bar = ui.linear_progress(value=0, show_value=False).classes('w-full')
+                current_func_label = ui.label('').classes('text-grey-7 text-sm')
+            
+            def update_progress(progress: ScrapeProgress):
+                """Update progress UI"""
+                pct = progress.current / progress.total if progress.total > 0 else 0
+                progress_bar.value = pct
+                progress_label.text = f'Download: {progress.current}/{progress.total}'
+                current_func_label.text = f'Aktuell: {progress.current_function}'
+            
+            # Run scraper in thread pool - scrape ALL documentation (functions + API)
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor() as executor:
+                all_docs = await loop.run_in_executor(
+                    executor,
+                    lambda: service.scrape_all_documentation(update_progress, delay=0.5)
+                )
+            
+            scraped_data['docs'] = all_docs
+            
+            # Show result
+            progress_container.visible = False
+            result_container.clear()
+            
+            func_count = len(all_docs.get('functions', {}))
+            api_count = len(all_docs.get('api', {}))
+            print_count = len(all_docs.get('print', {}))
+            
+            with result_container:
+                if func_count > 0 or api_count > 0 or print_count > 0:
+                    with ui.card().classes('w-full p-4 bg-green-50'):
+                        with ui.row().classes('items-center gap-3'):
+                            ui.icon('check_circle', size='md', color='positive')
+                            ui.label(f'{func_count} Funktionen + {api_count} API-Artikel + {print_count} Drucken-Artikel erfolgreich geladen!').classes('font-bold text-green-800')
+                    
+                    # Show errors if any
+                    if service.progress.errors:
+                        with ui.expansion(f'Fehler ({len(service.progress.errors)})', icon='warning').classes('w-full bg-amber-50'):
+                            for error in service.progress.errors:
+                                ui.label(f'• {error}').classes('text-sm text-amber-800')
+                    
+                    # Upload button
+                    if has_github:
+                        ui.button(
+                            'Zu GitHub hochladen',
+                            icon='cloud_upload',
+                            on_click=lambda: upload_to_github(all_docs),
+                            color='primary'
+                        ).classes('mt-4')
+                else:
+                    with ui.card().classes('w-full p-4 bg-red-50'):
+                        with ui.row().classes('items-center gap-3'):
+                            ui.icon('error', size='md', color='negative')
+                            ui.label('Fehler beim Laden der Dokumentation').classes('font-bold text-red-800')
+            
+            # Re-enable button
+            scrape_button.enable()
+        
+        async def upload_to_github(all_docs: dict):
+            """Upload documentation to GitHub as three separate files"""
+            result_container.clear()
+            
+            with result_container:
+                with ui.row().classes('items-center gap-2'):
+                    ui.spinner(size='sm')
+                    ui.label('Erstelle 3 Markdown-Dateien und lade zu GitHub hoch...').classes('text-grey-7')
+            
+            # Get GitHub credentials
+            db = get_db()
+            try:
+                db_user = db.query(User).filter(User.id == user.id).first()
+                if not db_user or not db_user.github_token_encrypted:
+                    raise ValueError("GitHub Token nicht konfiguriert")
+                
+                github_token = encryption.decrypt(db_user.github_token_encrypted)
+                github_org = db_user.github_organization
+            finally:
+                db.close()
+            
+            # Create separate markdown files
+            functions_md = service.create_functions_markdown(all_docs.get('functions', {}))
+            api_md = service.create_api_markdown(all_docs.get('api', {}))
+            print_md = service.create_print_markdown(all_docs.get('print', {}))
+            
+            # Upload in thread pool
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor() as executor:
+                result = await loop.run_in_executor(
+                    executor,
+                    lambda: service.upload_separate_files_to_github(
+                        functions_md,
+                        api_md,
+                        print_md,
+                        github_token,
+                        github_org,
+                        "ninox-docs"
+                    )
+                )
+            
+            result_container.clear()
+            
+            with result_container:
+                if result.get('success'):
+                    with ui.card().classes('w-full p-4 bg-green-50'):
+                        with ui.column().classes('gap-2'):
+                            with ui.row().classes('items-center gap-3'):
+                                ui.icon('check_circle', size='md', color='positive')
+                                ui.label('Erfolgreich hochgeladen!').classes('font-bold text-green-800')
+                            
+                            ui.label(f'Repository: {result.get("url")}').classes('text-sm')
+                            ui.label('3 Dateien erstellt: NINOX_FUNKTIONEN.md + NINOX_API.md + NINOX_DRUCKEN.md').classes('text-sm text-green-700')
+                            
+                            with ui.row().classes('gap-2 mt-2 flex-wrap'):
+                                ui.button(
+                                    'Repository öffnen',
+                                    icon='open_in_new',
+                                    on_click=lambda: ui.run_javascript(f'window.open("{result.get("url")}", "_blank")')
+                                ).props('flat color=primary')
+                                ui.button(
+                                    'Funktionen öffnen',
+                                    icon='functions',
+                                    on_click=lambda: ui.run_javascript(f'window.open("{result.get("functions_url")}", "_blank")')
+                                ).props('flat color=primary')
+                                ui.button(
+                                    'API öffnen',
+                                    icon='api',
+                                    on_click=lambda: ui.run_javascript(f'window.open("{result.get("api_url")}", "_blank")')
+                                ).props('flat color=primary')
+                                ui.button(
+                                    'Drucken öffnen',
+                                    icon='print',
+                                    on_click=lambda: ui.run_javascript(f'window.open("{result.get("print_url")}", "_blank")')
+                                ).props('flat color=primary')
+                else:
+                    with ui.card().classes('w-full p-4 bg-red-50'):
+                        with ui.row().classes('items-center gap-3'):
+                            ui.icon('error', size='md', color='negative')
+                            with ui.column().classes('gap-1'):
+                                ui.label('Fehler beim Hochladen').classes('font-bold text-red-800')
+                                ui.label(result.get('error', 'Unbekannter Fehler')).classes('text-sm text-red-700')
+        
+        # Main action button
+        scrape_button = ui.button(
+            'Dokumentation herunterladen',
+            icon='download',
+            on_click=run_scraper,
+            color='primary'
+        ).classes('mt-4')
+        
+        # Instructions
+        with ui.expansion('Anleitung: Claude AI Integration', icon='help_outline').classes('w-full mt-6 bg-grey-1'):
+            with ui.column().classes('gap-4 p-4'):
+                ui.markdown("""
+### So verwenden Sie die Ninox-Dokumentation mit Claude AI:
+
+1. **Dokumentation herunterladen**: Klicken Sie auf "Dokumentation herunterladen" um alle NinoxScript-Funktionen vom Forum zu laden.
+
+2. **Zu GitHub hochladen**: Nach dem Download können Sie die kombinierte Markdown-Datei in Ihr privates GitHub Repository hochladen.
+
+3. **Claude Project erstellen**: 
+   - Öffnen Sie [claude.ai](https://claude.ai) und erstellen Sie ein neues Project
+   - Gehen Sie zu "Project Knowledge" und wählen Sie "Connect to GitHub"
+   - Wählen Sie das Repository `ninox-docs` und die Datei `NINOX_FUNKTIONEN.md`
+
+4. **Ninox-Code generieren lassen**: Claude kann nun alle NinoxScript-Funktionen nachschlagen und korrekten Code generieren.
+
+### Empfohlener System-Prompt für Claude:
+
+```
+Du bist ein Ninox-Experte und hilfst beim Schreiben von NinoxScript-Code.
+Verwende die Ninox-Funktionsreferenz aus dem Project Knowledge, um korrekten Code zu generieren.
+Antworte auf Deutsch und erkläre den Code.
+```
+                """)
 
 
 def render_smtp_config(user):
@@ -1308,3 +1604,561 @@ def render_statistics(user):
             with ui.column().classes('w-full gap-3'):
                 ui.label(f'Total Logins: {total_logins}').classes('text-h6')
                 ui.label(f'Total Syncs: {total_syncs}').classes('text-grey-7')
+
+
+def render_prompt_management(user):
+    """Render prompt template management panel"""
+    from ..models.prompt_template import PromptTemplate, PromptType
+    
+    with ui.column().classes('w-full gap-4'):
+        ui.label('Prompt-Verwaltung').classes('text-h5 font-bold')
+        ui.label(
+            'Verwalten Sie Prompt-Templates für KI-Generierungen. '
+            'Erstellen Sie eigene Prompts und verknüpfen Sie diese mit AI-Providern.'
+        ).classes('text-grey-7 mb-4')
+        
+        # Add new prompt button
+        with ui.row().classes('w-full justify-between items-center mb-4'):
+            ui.button(
+                'Neuer Prompt',
+                icon='add',
+                on_click=lambda: show_prompt_edit_dialog(None, user, prompts_container, load_prompts)
+            ).props('color=primary')
+        
+        # Container for prompt cards
+        prompts_container = ui.column().classes('w-full gap-4')
+        
+        def load_prompts():
+            """Load and display all prompt templates"""
+            prompts_container.clear()
+            
+            db = get_db()
+            try:
+                prompts = db.query(PromptTemplate).order_by(
+                    PromptTemplate.prompt_type,
+                    PromptTemplate.is_default.desc(),
+                    PromptTemplate.name
+                ).all()
+                
+                if not prompts:
+                    with prompts_container:
+                        ui.label('Keine Prompts vorhanden').classes('text-grey-6')
+                else:
+                    # Group by type
+                    by_type = {}
+                    for p in prompts:
+                        if p.prompt_type not in by_type:
+                            by_type[p.prompt_type] = []
+                        by_type[p.prompt_type] = []
+                    
+                    for p in prompts:
+                        by_type[p.prompt_type].append(p)
+                    
+                    with prompts_container:
+                        for prompt_type, prompt_list in by_type.items():
+                            ui.label(f'{prompt_list[0].type_label if prompt_list else prompt_type}').classes('text-h6 font-bold mt-4 mb-2')
+                            for prompt in prompt_list:
+                                render_prompt_card(prompt, user, prompts_container, load_prompts)
+                        
+            finally:
+                db.close()
+        
+        load_prompts()
+
+
+def render_prompt_card(prompt: "PromptTemplate", user, container, reload_callback):
+    """Render a single prompt template card"""
+    from ..models.prompt_template import PromptTemplate
+    
+    border_style = 'border-left: 4px solid #9333EA;'
+    if prompt.is_default:
+        border_style = 'border: 2px solid #9333EA;'
+    
+    with ui.card().classes('w-full p-4').style(border_style):
+        with ui.row().classes('w-full items-start justify-between'):
+            # Prompt info
+            with ui.column().classes('flex-1 gap-2'):
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('edit_note', size='md').classes('text-purple')
+                    ui.label(prompt.name).classes('text-h6 font-bold')
+                    
+                    if prompt.is_default:
+                        ui.badge('Standard', color='primary')
+                    if not prompt.is_active:
+                        ui.badge('Inaktiv', color='grey')
+                
+                if prompt.description:
+                    ui.label(prompt.description).classes('text-grey-7 text-sm')
+                
+                # Metadata
+                with ui.row().classes('items-center gap-4 text-xs text-grey-6 mt-2'):
+                    ui.label(f'Typ: {prompt.type_label}')
+                    ui.label(f'Version: {prompt.version}')
+                    if prompt.created_by:
+                        ui.label(f'Erstellt von: {prompt.created_by}')
+                    ui.label(f'Erstellt: {format_datetime(prompt.created_at) if hasattr(prompt, "created_at") and prompt.created_at else "N/A"}')
+                
+                # Preview
+                preview_text = prompt.prompt_text[:200] + '...' if len(prompt.prompt_text) > 200 else prompt.prompt_text
+                with ui.expansion('Prompt-Vorschau', icon='visibility').classes('w-full mt-2'):
+                    ui.markdown(f'```\n{preview_text}\n```').classes('text-xs')
+            
+            # Actions
+            with ui.column().classes('gap-2'):
+                ui.button(
+                    'Bearbeiten',
+                    icon='edit',
+                    on_click=lambda p=prompt: show_prompt_edit_dialog(p, user, container, reload_callback)
+                ).props('flat dense color=primary')
+                
+                if not prompt.is_default:
+                    ui.button(
+                        'Als Standard',
+                        icon='star',
+                        on_click=lambda p=prompt: set_default_prompt(p, reload_callback)
+                    ).props('flat dense color=warning')
+                
+                ui.button(
+                    'Löschen',
+                    icon='delete',
+                    on_click=lambda p=prompt: delete_prompt(p, reload_callback)
+                ).props('flat dense color=negative')
+
+
+def show_prompt_edit_dialog(prompt: "PromptTemplate" = None, user=None, container=None, reload_callback=None):
+    """Show dialog to create or edit a prompt template"""
+    from ..models.prompt_template import PromptTemplate, PromptType
+    
+    is_new = prompt is None
+    
+    with ui.dialog() as dialog, ui.card().classes('p-6').style('min-width: 800px; max-width: 1000px;'):
+        ui.label('Neuer Prompt' if is_new else f'Prompt bearbeiten: {prompt.name}').classes('text-h5 font-bold mb-4')
+        
+        with ui.column().classes('w-full gap-4'):
+            # Name
+            name_input = ui.input(
+                label='Name',
+                placeholder='z.B. Standard Dokumentation',
+                value=prompt.name if prompt else ''
+            ).classes('w-full')
+            
+            # Description
+            desc_input = ui.textarea(
+                label='Beschreibung',
+                placeholder='Kurze Beschreibung des Prompts...',
+                value=prompt.description if prompt and prompt.description else ''
+            ).classes('w-full')
+            
+            # Type
+            type_options = {
+                'documentation': 'Dokumentation',
+                'changelog': 'Changelog',
+                'code_review': 'Code Review',
+                'custom': 'Benutzerdefiniert'
+            }
+            type_select = ui.select(
+                label='Typ',
+                options=type_options,
+                value=prompt.prompt_type if prompt else 'documentation'
+            ).classes('w-full')
+            
+            # Prompt text (large textarea)
+            prompt_input = ui.textarea(
+                label='Prompt-Text',
+                placeholder='Geben Sie hier den Prompt ein...',
+                value=prompt.prompt_text if prompt else ''
+            ).classes('w-full').style('min-height: 400px; font-family: monospace;')
+            
+            # Active checkbox
+            is_active_cb = ui.checkbox(
+                'Aktiv',
+                value=prompt.is_active if prompt else True
+            )
+            
+            # Default checkbox
+            is_default_cb = ui.checkbox(
+                'Als Standard für diesen Typ verwenden',
+                value=prompt.is_default if prompt else False
+            )
+        
+        # Buttons
+        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+            ui.button('Abbrechen', on_click=dialog.close).props('flat')
+            ui.button(
+                'Speichern' if is_new else 'Aktualisieren',
+                icon='save',
+                on_click=lambda: save_prompt(
+                    dialog,
+                    prompt,
+                    name_input.value,
+                    desc_input.value,
+                    type_select.value,
+                    prompt_input.value,
+                    is_active_cb.value,
+                    is_default_cb.value,
+                    user,
+                    reload_callback
+                )
+            ).props('color=primary')
+    
+    dialog.open()
+
+
+def save_prompt(dialog, existing_prompt, name, description, prompt_type, prompt_text, is_active, is_default, user, reload_callback):
+    """Save or update a prompt template"""
+    from ..models.prompt_template import PromptTemplate
+    
+    try:
+        if not name or not prompt_text:
+            ui.notify('Name und Prompt-Text sind erforderlich', type='negative')
+            return
+        
+        db = get_db()
+        try:
+            if existing_prompt:
+                # Update existing
+                existing_prompt.name = name
+                existing_prompt.description = description
+                existing_prompt.prompt_type = prompt_type
+                existing_prompt.prompt_text = prompt_text
+                existing_prompt.is_active = is_active
+                existing_prompt.is_default = is_default
+                existing_prompt.last_modified_by = user.username
+                existing_prompt.version += 1
+                
+                db.merge(existing_prompt)
+            else:
+                # Create new
+                new_prompt = PromptTemplate(
+                    name=name,
+                    description=description,
+                    prompt_type=prompt_type,
+                    prompt_text=prompt_text,
+                    is_active=is_active,
+                    is_default=is_default,
+                    created_by=user.username,
+                    version=1
+                )
+                db.add(new_prompt)
+            
+            # If set as default, unset other defaults for this type
+            if is_default:
+                db.query(PromptTemplate).filter(
+                    PromptTemplate.prompt_type == prompt_type,
+                    PromptTemplate.id != (existing_prompt.id if existing_prompt else -1)
+                ).update({'is_default': False})
+            
+            db.commit()
+            
+            ui.notify(f'Prompt {"aktualisiert" if existing_prompt else "erstellt"}!', type='positive')
+            dialog.close()
+            
+            if reload_callback:
+                reload_callback()
+                
+        finally:
+            db.close()
+            
+    except Exception as e:
+        ui.notify(f'Fehler beim Speichern: {str(e)}', type='negative')
+
+
+def set_default_prompt(prompt: "PromptTemplate", reload_callback):
+    """Set a prompt as default for its type"""
+    from ..models.prompt_template import PromptTemplate
+    
+    db = get_db()
+    try:
+        # Unset all defaults for this type
+        db.query(PromptTemplate).filter(
+            PromptTemplate.prompt_type == prompt.prompt_type
+        ).update({'is_default': False})
+        
+        # Set this as default
+        prompt.is_default = True
+        db.merge(prompt)
+        db.commit()
+        
+        ui.notify(f'{prompt.name} ist jetzt der Standard-Prompt', type='positive')
+        
+        if reload_callback:
+            reload_callback()
+            
+    finally:
+        db.close()
+
+
+def delete_prompt(prompt: "PromptTemplate", reload_callback):
+    """Delete a prompt template"""
+    from ..models.prompt_template import PromptTemplate
+    
+    def confirm_delete():
+        db = get_db()
+        try:
+            db.query(PromptTemplate).filter(PromptTemplate.id == prompt.id).delete()
+            db.commit()
+            
+            ui.notify(f'Prompt "{prompt.name}" gelöscht', type='positive')
+            
+            if reload_callback:
+                reload_callback()
+                
+        finally:
+            db.close()
+    
+    ConfirmDialog(
+        title='Prompt löschen?',
+        message=f'Möchten Sie den Prompt "{prompt.name}" wirklich löschen?',
+        on_confirm=confirm_delete
+    ).show()
+
+
+def render_bookstack_config(user):
+    """Render BookStack configuration panel"""
+    from ..models.bookstack_config import BookstackConfig
+    
+    encryption = get_encryption_manager()
+    
+    with ui.column().classes('w-full gap-4'):
+        ui.label('BookStack-Konfiguration').classes('text-h5 font-bold')
+        ui.label(
+            'Konfigurieren Sie BookStack-Instanzen für die automatische Dokumentations-Übertragung. '
+            'Pro Server kann eine BookStack-Instanz mit vordefiniertem Shelf (Regal) konfiguriert werden.'
+        ).classes('text-grey-7 mb-4')
+        
+        # Container for server configs
+        bookstack_container = ui.column().classes('w-full gap-4')
+        
+        def load_bookstack_configs():
+            """Load and display BookStack configurations for all servers"""
+            bookstack_container.clear()
+            
+            db = get_db()
+            try:
+                # Get all active servers
+                servers = db.query(Server).filter(Server.is_active == True).all()
+                
+                if not servers:
+                    with bookstack_container:
+                        ui.label('Keine aktiven Server vorhanden').classes('text-grey-6')
+                    return
+                
+                with bookstack_container:
+                    for server in servers:
+                        # Get or create BookStack config for this server
+                        bs_config = db.query(BookstackConfig).filter(
+                            BookstackConfig.server_id == server.id
+                        ).first()
+                        
+                        render_bookstack_card(server, bs_config, user, bookstack_container, load_bookstack_configs)
+                        
+            finally:
+                db.close()
+        
+        load_bookstack_configs()
+
+
+def render_bookstack_card(server: Server, config: BookstackConfig, user, container, reload_callback):
+    """Render BookStack configuration card for a server"""
+    encryption = get_encryption_manager()
+    
+    is_configured = config and config.is_configured
+    border_style = 'border-left: 4px solid #7C3AED;' if is_configured else 'border-left: 4px solid #D1D5DB;'
+    
+    with ui.card().classes('w-full p-4').style(border_style):
+        with ui.row().classes('w-full items-center justify-between'):
+            # Server info
+            with ui.row().classes('items-center gap-3'):
+                ui.icon('menu_book', size='lg').classes('text-purple')
+                with ui.column().classes('gap-1'):
+                    with ui.row().classes('items-center gap-2'):
+                        ui.label(f'Server: {server.name}').classes('text-h6 font-bold')
+                        
+                        if is_configured:
+                            ui.badge('Konfiguriert', color='purple')
+                            if config.is_active:
+                                ui.badge('Aktiv', color='positive')
+                        else:
+                            ui.badge('Nicht konfiguriert', color='grey')
+                    
+                    # Show URL and shelf if configured
+                    if config:
+                        ui.label(f'URL: {config.url}').classes('text-sm text-grey-7')
+                        ui.label(f'Shelf: {config.default_shelf_name}').classes('text-sm text-grey-7')
+                        
+                        # Connection status
+                        if config.last_test_success is True:
+                            ui.label('✓ Verbindung erfolgreich').classes('text-positive text-xs')
+                        elif config.last_test_success is False:
+                            ui.label(f'✗ Verbindungsfehler: {config.last_test_error[:50] if config.last_test_error else "Unbekannt"}').classes('text-negative text-xs')
+            
+            # Actions
+            with ui.row().classes('gap-2'):
+                ui.button(
+                    'Konfigurieren',
+                    icon='settings',
+                    on_click=lambda: show_bookstack_config_dialog(server, config, user, reload_callback)
+                ).props('flat dense color=primary')
+                
+                if is_configured:
+                    ui.button(
+                        'Testen',
+                        icon='check_circle',
+                        on_click=lambda: test_bookstack_connection(server, config, reload_callback)
+                    ).props('flat dense color=purple')
+
+
+def show_bookstack_config_dialog(server: Server, config: BookstackConfig, user, reload_callback):
+    """Show dialog to configure BookStack for a server"""
+    from ..models.bookstack_config import BookstackConfig
+    
+    encryption = get_encryption_manager()
+    
+    # Decrypt existing token if available
+    existing_token = ""
+    if config and config.api_token_encrypted:
+        try:
+            existing_token = encryption.decrypt(config.api_token_encrypted)
+        except:
+            existing_token = ""
+    
+    with ui.dialog() as dialog, ui.card().classes('p-6').style('min-width: 600px;'):
+        ui.label(f'BookStack konfigurieren: {server.name}').classes('text-h5 font-bold mb-4')
+        
+        with ui.column().classes('w-full gap-4'):
+            # URL input
+            url_input = ui.input(
+                label='BookStack URL',
+                placeholder='https://docs.firma.de',
+                value=config.url if config else ''
+            ).classes('w-full')
+            ui.label('Vollständige URL Ihrer BookStack-Instanz').classes('text-xs text-grey-6')
+            
+            # API Token input
+            token_input = ui.input(
+                label='API-Token',
+                placeholder='Token ID:Token Secret',
+                password=True,
+                password_toggle_button=True,
+                value=existing_token
+            ).classes('w-full')
+            ui.label('Format: token_id:token_secret (aus BookStack Einstellungen)').classes('text-xs text-grey-6')
+            
+            # Shelf name input
+            shelf_input = ui.input(
+                label='Standard-Shelf-Name (Regal)',
+                placeholder='Ninox Datenbanken',
+                value=config.default_shelf_name if config else 'Ninox Datenbanken'
+            ).classes('w-full')
+            ui.label('Name des Regals, in dem alle Datenbank-Bücher gespeichert werden').classes('text-xs text-grey-6')
+            
+            # Active switch
+            is_active_switch = ui.switch(
+                'Aktiv',
+                value=config.is_active if config else True
+            )
+        
+        error_label = ui.label('').classes('text-negative')
+        error_label.visible = False
+        
+        async def save_config():
+            """Save BookStack configuration"""
+            url = url_input.value.strip()
+            token = token_input.value.strip()
+            shelf_name = shelf_input.value.strip()
+            is_active = is_active_switch.value
+            
+            if not url:
+                error_label.text = 'Bitte geben Sie eine URL ein'
+                error_label.visible = True
+                return
+            
+            if not token:
+                error_label.text = 'Bitte geben Sie einen API-Token ein'
+                error_label.visible = True
+                return
+            
+            if not shelf_name:
+                error_label.text = 'Bitte geben Sie einen Shelf-Namen ein'
+                error_label.visible = True
+                return
+            
+            db = get_db()
+            try:
+                if config:
+                    # Update existing
+                    config.url = url
+                    config.api_token_encrypted = encryption.encrypt(token)
+                    config.default_shelf_name = shelf_name
+                    config.is_active = is_active
+                    config.last_test_success = None  # Reset test status
+                    db.merge(config)
+                else:
+                    # Create new
+                    new_config = BookstackConfig(
+                        server_id=server.id,
+                        url=url,
+                        api_token_encrypted=encryption.encrypt(token),
+                        default_shelf_name=shelf_name,
+                        is_active=is_active
+                    )
+                    db.add(new_config)
+                
+                db.commit()
+                
+                Toast.success(f'BookStack konfiguriert für {server.name}')
+                dialog.close()
+                reload_callback()
+                
+            except Exception as e:
+                error_label.text = f'Fehler beim Speichern: {str(e)}'
+                error_label.visible = True
+            finally:
+                db.close()
+        
+        # Buttons
+        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+            ui.button('Abbrechen', on_click=dialog.close).props('flat')
+            ui.button('Speichern', icon='save', on_click=save_config).props('color=primary')
+    
+    dialog.open()
+
+
+def test_bookstack_connection(server: Server, config: BookstackConfig, reload_callback):
+    """Test connection to BookStack"""
+    from ..api.bookstack_client import BookStackClient
+    from ..utils.encryption import get_encryption_manager
+    
+    encryption = get_encryption_manager()
+    
+    try:
+        # Decrypt token
+        api_token = encryption.decrypt(config.api_token_encrypted)
+        
+        # Create client
+        client = BookStackClient(config.url, api_token)
+        
+        # Test connection
+        ui.notify('Teste Verbindung zu BookStack...', type='info')
+        success, error = client.test_connection()
+        
+        # Update config
+        db = get_db()
+        try:
+            config.last_test_at = datetime.now()
+            config.last_test_success = success
+            config.last_test_error = error if not success else None
+            db.merge(config)
+            db.commit()
+        finally:
+            db.close()
+        
+        if success:
+            Toast.success(f'✓ Verbindung zu BookStack erfolgreich!')
+        else:
+            Toast.error(f'✗ Verbindung fehlgeschlagen: {error}')
+        
+        reload_callback()
+        
+    except Exception as e:
+        Toast.error(f'Fehler beim Testen: {str(e)}')

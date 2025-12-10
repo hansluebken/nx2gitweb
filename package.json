@@ -1,0 +1,16 @@
+{
+  "name": "ninox2git-webapp",
+  "version": "1.0.0",
+  "description": "Ninox2Git WebApp - ninox-dev-cli integration",
+  "private": true,
+  "scripts": {
+    "ninox": "ninox",
+    "postinstall": "echo 'ninox-dev-cli installed successfully'"
+  },
+  "dependencies": {
+    "@ninox/ninox": "^0.1.9"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

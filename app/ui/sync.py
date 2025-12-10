@@ -26,13 +26,292 @@ from .components import (
 from .database_timeline import show_database_timeline_dialog
 import json
 
+# Cache for dependency scans to avoid re-scanning same databases
+_dependency_cache = {}
 
-def render(user):
+# Global state to track open dialogs (prevents refresh during dialog viewing)
+_dialog_open_state = {'count': 0}
+
+# Track databases currently generating documentation with progress
+_doc_generating = {}  # Dict: database_id -> {'current': 1, 'total': 3}
+
+# Flag to force immediate refresh (set when doc generation starts)
+_force_refresh = {'needed': False}
+
+
+def clear_dependency_cache():
+    """Clear the dependency cache (call after YAML sync)"""
+    global _dependency_cache
+    _dependency_cache = {}
+
+
+def save_database_dependencies(team: Team, database_id: str):
+    """
+    Scan and save dependencies for a database after YAML sync.
+
+    Args:
+        team: Team model
+        database_id: Ninox database ID that was just synced
+    """
+    import logging
+    from ..models.database_dependency import DatabaseDependency
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        db = get_db()
+        try:
+            # Get the database object
+            database = db.query(Database).filter(
+                Database.team_id == team.id,
+                Database.database_id == database_id
+            ).first()
+
+            if not database:
+                logger.warning(f"Database not found: {database_id}")
+                return
+
+            # Clear existing dependencies for this database
+            db.query(DatabaseDependency).filter(
+                DatabaseDependency.source_database_id == database.id
+            ).delete()
+
+            # Scan for dependencies
+            dependencies = find_database_dependencies(team, database_id)
+
+            logger.info(f"Found {len(dependencies)} dependencies for {database.name}")
+
+            # Save dependencies
+            for dep_ninox_id in dependencies:
+                # Find target database
+                target_db = db.query(Database).filter(
+                    Database.team_id == team.id,
+                    Database.database_id == dep_ninox_id
+                ).first()
+
+                if target_db:
+                    # Create dependency record
+                    dep = DatabaseDependency(
+                        source_database_id=database.id,
+                        target_database_id=target_db.id,
+                        source_ninox_id=database_id,
+                        target_ninox_id=dep_ninox_id
+                    )
+                    db.add(dep)
+                    logger.info(f"Saved dependency: {database.name} → {target_db.name}")
+                else:
+                    logger.warning(f"Target database not found: {dep_ninox_id}")
+
+            db.commit()
+            logger.info(f"✓ Saved {len(dependencies)} dependencies for {database.name}")
+
+        finally:
+            db.close()
+
+    except Exception as e:
+        logger.error(f"Error saving dependencies for {database_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+def find_database_dependencies(team: Team, database_id: str, visited: set = None) -> set:
+    """
+    Find all databases that this database depends on (recursively).
+
+    Args:
+        team: Team model
+        database_id: Database ID to check
+        visited: Set of already visited database IDs (to avoid infinite loops)
+
+    Returns:
+        Set of database IDs that this database depends on
+    """
+    import logging
+    from pathlib import Path
+    import yaml
+
+    logger = logging.getLogger(__name__)
+
+    # Check cache first
+    cache_key = f"{team.team_id}_{database_id}"
+    if cache_key in _dependency_cache:
+        logger.debug(f"Using cached dependencies for {database_id}")
+        return _dependency_cache[cache_key].copy()
+
+    if visited is None:
+        visited = set()
+
+    # Avoid infinite loops
+    if database_id in visited:
+        return set()
+
+    visited.add(database_id)
+    dependencies = set()
+
+    try:
+        # Get team-specific folder using clear names
+        from ..services.ninox_cli_service import get_ninox_cli_service
+        from ..utils.path_resolver import get_team_path
+        from ..utils.metadata_helper import read_database_metadata
+
+        server = team.server
+        cli_service = get_ninox_cli_service()
+        team_path = get_team_path(server, team)
+
+        # Find database by ID - need to scan all databases in team
+        db_path = None
+        team_objects = team_path / 'src' / 'Objects'
+        if team_objects.exists():
+            for potential_db in team_objects.parent.parent.rglob('.ninox-metadata.json'):
+                try:
+                    metadata = read_database_metadata(potential_db.parent)
+                    if metadata['database_id'] == database_id:
+                        db_path = potential_db.parent / 'src' / 'Objects'
+                        break
+                except:
+                    continue
+
+        if not db_path:
+            # Fallback: old structure or not found
+            db_path = team_path / 'src' / 'Objects' / f'database_{database_id}'
+
+        if not db_path.exists():
+            logger.warning(f"Database path not found: {db_path}")
+            return dependencies
+
+        # Recursively scan all YAML files for dbId references
+        for yaml_file in db_path.rglob('*.yaml'):
+            try:
+                with open(yaml_file, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+
+                    # Search for dbId in the YAML structure
+                    def find_dbid(obj, depth=0):
+                        if depth > 20:  # Prevent deep recursion
+                            return
+
+                        if isinstance(obj, dict):
+                            # Check for dbId key
+                            if 'dbId' in obj and obj['dbId']:
+                                ref_db_id = obj['dbId']
+                                if ref_db_id != database_id:  # Don't include self
+                                    dependencies.add(ref_db_id)
+                                    logger.info(f"Found dependency: {database_id} -> {ref_db_id}")
+
+                            # Recursively search in dict values
+                            for value in obj.values():
+                                find_dbid(value, depth + 1)
+
+                        elif isinstance(obj, list):
+                            # Recursively search in list items
+                            for item in obj:
+                                find_dbid(item, depth + 1)
+
+                    find_dbid(data)
+
+            except Exception as e:
+                logger.debug(f"Could not parse {yaml_file}: {e}")
+                continue
+
+        # Recursively find dependencies of dependencies
+        all_deps = dependencies.copy()
+        for dep_id in dependencies:
+            sub_deps = find_database_dependencies(team, dep_id, visited)
+            all_deps.update(sub_deps)
+
+        # Cache the result
+        _dependency_cache[cache_key] = all_deps.copy()
+        logger.info(f"Cached {len(all_deps)} dependencies for {database_id}")
+
+        return all_deps
+
+    except Exception as e:
+        logger.error(f"Error finding dependencies for {database_id}: {e}")
+        return dependencies
+
+
+def build_dependency_graph(team: Team, all_databases: list) -> dict:
+    """
+    Build a complete dependency graph for all databases in a team (efficient, one-time scan).
+
+    Returns:
+        Dict with 'dependencies' (what each DB needs) and 'dependents' (what needs each DB)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    graph = {
+        'dependencies': {},  # db_id -> set of db_ids it depends on
+        'dependents': {}     # db_id -> set of db_ids that depend on it
+    }
+
+    # Initialize
+    for db in all_databases:
+        graph['dependencies'][db.database_id] = set()
+        graph['dependents'][db.database_id] = set()
+
+    # Scan each database once
+    for db in all_databases:
+        deps = find_database_dependencies(team, db.database_id)
+        graph['dependencies'][db.database_id] = deps
+
+        # Build reverse mapping
+        for dep_id in deps:
+            if dep_id in graph['dependents']:
+                graph['dependents'][dep_id].add(db.database_id)
+
+    logger.info(f"Built dependency graph for {len(all_databases)} databases")
+    return graph
+
+
+def find_dependent_databases(team: Team, database_id: str, all_databases: list = None) -> set:
+    """
+    Find all databases that depend on this database (recursively).
+    Uses efficient graph-based approach.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Get all databases for this team if not provided
+        if all_databases is None:
+            db = get_db()
+            try:
+                all_databases = db.query(Database).filter(Database.team_id == team.id).all()
+            finally:
+                db.close()
+
+        # Build dependency graph once
+        graph = build_dependency_graph(team, all_databases)
+
+        # Get direct dependents
+        dependents = graph['dependents'].get(database_id, set()).copy()
+
+        # Recursively add dependents of dependents
+        to_process = list(dependents)
+        while to_process:
+            current = to_process.pop()
+            for dep in graph['dependents'].get(current, set()):
+                if dep not in dependents:
+                    dependents.add(dep)
+                    to_process.append(dep)
+
+        logger.info(f"Found {len(dependents)} databases that depend on {database_id}")
+        return dependents
+
+    except Exception as e:
+        logger.error(f"Error finding dependents for {database_id}: {e}")
+        return set()
+
+
+def render(user, server_id_param=None, team_id_param=None):
     """
     Render the synchronization page
 
     Args:
         user: Current user object
+        server_id_param: Optional server ID from URL parameter
+        team_id_param: Optional team ID from URL parameter
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -40,34 +319,27 @@ def render(user):
     ui.colors(primary=PRIMARY_COLOR)
 
     # Navigation header
-    NavHeader(user, 'sync').render()
+    NavHeader(user, 'synchronization').render()
 
-    # Get team parameter from URL if present
-    from urllib.parse import parse_qs, urlparse
-    try:
-        query_params = parse_qs(urlparse(ui.page.url).query)
-        team_id_param = query_params.get('team', [None])[0]
-        if team_id_param:
-            team_id_param = int(team_id_param)
-            logger.info(f"Team ID from URL parameter: {team_id_param}")
-    except:
-        team_id_param = None
-        logger.info("No team ID parameter in URL")
+    # Log URL parameters if provided
+    if server_id_param:
+        logger.info(f"Server ID from URL parameter: {server_id_param}")
+    if team_id_param:
+        logger.info(f"Team ID from URL parameter: {team_id_param}")
 
     # Main content
     with ui.column().classes('w-full p-6 gap-6').style('max-width: 1400px; margin: 0 auto;'):
         ui.label('Synchronization').classes('text-h4 font-bold mb-4')
-
         # Server and team selectors
         selector_container = ui.column().classes('w-full')
         databases_container = ui.column().classes('w-full gap-4 mt-4')
         history_container = ui.column().classes('w-full gap-4 mt-4')
 
         with selector_container:
-            render_selectors(user, databases_container, history_container, team_id_param)
+            render_selectors(user, databases_container, history_container, server_id_param, team_id_param)
 
 
-def render_selectors(user, databases_container, history_container, team_id_param=None):
+def render_selectors(user, databases_container, history_container, server_id_param=None, team_id_param=None):
     """Render server and team selectors"""
     import logging
     logger = logging.getLogger(__name__)
@@ -81,17 +353,30 @@ def render_selectors(user, databases_container, history_container, team_id_param
             db.add(preferences)
             db.commit()
 
-        # If team_id_param is provided, find the team and its server
+        # If server_id_param or team_id_param is provided, use them for initial selection
         override_server = None
         override_team = None
+
+        # First, check if server_id_param is provided
+        if server_id_param:
+            logger.info(f"Looking for server with ID: {server_id_param}")
+            override_server = db.query(Server).filter(Server.id == server_id_param).first()
+            if override_server:
+                logger.info(f"Found server: {override_server.name}")
+                preferences.last_selected_server_id = override_server.id
+                db.commit()
+
+        # Then, check if team_id_param is provided
         if team_id_param:
             logger.info(f"Looking for team with ID: {team_id_param}")
             team = db.query(Team).filter(Team.id == team_id_param).first()
             if team:
                 logger.info(f"Found team: {team.name}, server_id: {team.server_id}")
                 override_team = team
-                override_server = db.query(Server).filter(Server.id == team.server_id).first()
-                # Also update preferences to remember this selection
+                # If server wasn't already set by server_id_param, get it from team
+                if not override_server:
+                    override_server = db.query(Server).filter(Server.id == team.server_id).first()
+                # Update preferences to remember this selection
                 preferences.last_selected_team_id = team.id
                 preferences.last_selected_server_id = team.server_id
                 db.commit()
@@ -264,33 +549,28 @@ def render_selectors(user, databases_container, history_container, team_id_param
 
 
 async def generate_ai_changelog(
-    user,
-    server,
-    team,
-    database,
-    github_mgr,
-    repo,
-    github_path: str,
-    logger
+    user, server, team, database,
+    team_path, logger
 ):
     """
-    Generate AI-powered changelog entry for the latest commit.
+    Generate AI-powered changelog entry from local YAML git commits.
     Runs in background to not block the sync process.
-    
+
     Args:
         user: Current user object
         server: Server object
-        team: Team object  
+        team: Team object
         database: Database object
-        github_mgr: GitHubManager instance
-        repo: GitHub repository object
-        github_path: Path to the database files in GitHub
+        team_path: Path to team folder with local git repo (Path object)
         logger: Logger instance
     """
     from concurrent.futures import ThreadPoolExecutor
     from ..services.ai_changelog import get_ai_changelog_service
     from ..models.ai_config import AIConfig
-    
+    from pathlib import Path
+    import subprocess
+    from datetime import datetime
+
     try:
         # Check if AI is configured
         db = get_db()
@@ -300,115 +580,179 @@ async def generate_ai_changelog(
             AIConfig.api_key_encrypted != None
         ).first()
         db.close()
-        
+
         if not ai_config:
             logger.info("AI changelog skipped: No AI provider configured")
             return
-        
-        logger.info(f"Generating AI changelog for {database.name}...")
-        
-        # Get the latest commit for this database's structure file
-        db_name = sanitize_name(database.name)
-        structure_path = f'{github_path}/{db_name}-structure.json'
-        
-        # Get latest commit
-        latest_commit = github_mgr.get_latest_commit(repo, path=structure_path)
-        
-        if not latest_commit:
-            logger.warning(f"No commits found for {structure_path}")
+
+        logger.info(f"Generating AI changelog for {database.name} from local YAML...")
+
+        # Get the path to the database YAML folder in local git
+        db_folder = team_path / 'src' / 'Objects' / f'database_{database.database_id}'
+
+        if not db_folder.exists():
+            logger.warning(f"Database folder not found: {db_folder}")
             return
-        
+
+        # Get latest commit SHA for this database folder
+        result = subprocess.run(
+            ['git', 'log', '-1', '--format=%H', '--', str(db_folder)],
+            cwd=team_path,
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0 or not result.stdout.strip():
+            logger.warning(f"No commits found for {db_folder}")
+            return
+
+        commit_sha = result.stdout.strip()
+
         # Check if we already have a changelog for this commit
         db = get_db()
         existing = db.query(ChangeLog).filter(
             ChangeLog.database_id == database.id,
-            ChangeLog.commit_sha == latest_commit.sha
+            ChangeLog.commit_sha == commit_sha
         ).first()
         db.close()
-        
+
         if existing:
-            logger.info(f"Changelog already exists for commit {latest_commit.short_sha}")
+            logger.info(f"Changelog already exists for commit {commit_sha[:7]}")
             return
-        
-        # Get diff data for this commit
-        diff_data = github_mgr.get_commit_diff_for_changelog(repo, latest_commit.sha, structure_path)
-        
-        if not diff_data or not diff_data.get('full_patch'):
-            logger.info(f"No diff data for commit {latest_commit.short_sha} - skipping AI analysis")
+
+        # Get commit info
+        commit_info_result = subprocess.run(
+            ['git', 'log', '-1', '--format=%H%n%h%n%s%n%cI%n%an%n%ae', commit_sha],
+            cwd=team_path,
+            capture_output=True,
+            text=True
+        )
+
+        if commit_info_result.returncode != 0:
+            logger.error(f"Failed to get commit info")
+            return
+
+        lines = commit_info_result.stdout.strip().split('\n')
+        commit_full_sha = lines[0]
+        commit_short_sha = lines[1]
+        commit_message = lines[2] if len(lines) > 2 else ''
+        commit_date_str = lines[3] if len(lines) > 3 else ''
+        author_name = lines[4] if len(lines) > 4 else ''
+        author_email = lines[5] if len(lines) > 5 else ''
+
+        # Parse commit date
+        try:
+            commit_date = datetime.fromisoformat(commit_date_str.replace('Z', '+00:00'))
+        except:
+            commit_date = datetime.utcnow()
+
+        # Get diff for this commit (compare with previous commit)
+        diff_result = subprocess.run(
+            ['git', 'diff', f'{commit_sha}~1', commit_sha, '--', str(db_folder)],
+            cwd=team_path,
+            capture_output=True,
+            text=True
+        )
+
+        if diff_result.returncode != 0:
+            logger.warning(f"Could not get diff for commit {commit_short_sha}")
+            diff_content = ""
+        else:
+            diff_content = diff_result.stdout
+
+        # Get stats
+        stats_result = subprocess.run(
+            ['git', 'diff', '--stat', f'{commit_sha}~1', commit_sha, '--', str(db_folder)],
+            cwd=team_path,
+            capture_output=True,
+            text=True
+        )
+
+        files_changed = 0
+        additions = 0
+        deletions = 0
+
+        if stats_result.returncode == 0:
+            # Parse stats: "X files changed, Y insertions(+), Z deletions(-)"
+            stats_line = stats_result.stdout.strip().split('\n')[-1] if stats_result.stdout.strip() else ""
+            import re
+            files_match = re.search(r'(\d+) file', stats_line)
+            add_match = re.search(r'(\d+) insertion', stats_line)
+            del_match = re.search(r'(\d+) deletion', stats_line)
+
+            if files_match:
+                files_changed = int(files_match.group(1))
+            if add_match:
+                additions = int(add_match.group(1))
+            if del_match:
+                deletions = int(del_match.group(1))
+
+        if not diff_content or diff_content.strip() == '':
+            logger.info(f"No changes in YAML for commit {commit_short_sha} - skipping AI analysis")
             # Still create a basic changelog entry without AI
             db = get_db()
             changelog = ChangeLog(
                 database_id=database.id,
-                commit_sha=latest_commit.sha,
-                commit_date=latest_commit.date,
-                commit_message=latest_commit.message,
-                commit_url=latest_commit.url,
-                files_changed=latest_commit.files_changed,
-                additions=latest_commit.additions,
-                deletions=latest_commit.deletions,
+                commit_sha=commit_full_sha,
+                commit_date=commit_date,
+                commit_message=commit_message,
+                commit_url='',  # Local git, no URL
+                files_changed=files_changed,
+                additions=additions,
+                deletions=deletions,
                 ai_summary=None,
                 ai_details=None,
             )
             db.add(changelog)
             db.commit()
             db.close()
-            logger.info(f"Created basic changelog entry (no AI) for {latest_commit.short_sha}")
+            logger.info(f"Created basic changelog entry (no AI) for {commit_short_sha}")
             return
-        
+
         # Run AI analysis in thread pool to not block
         loop = asyncio.get_event_loop()
         service = get_ai_changelog_service()
-        
+
         def do_ai_analysis():
             """Blocking AI call"""
             context = {
                 'database_name': database.name,
-                'changed_items': diff_data.get('changed_items', []),
+                'commit_message': commit_message,
+                'files_changed': files_changed,
             }
             return service.analyze_diff(
-                diff=diff_data.get('full_patch', ''),
+                diff=diff_content,
                 context=context
             )
-        
+
         with ThreadPoolExecutor() as executor:
             analysis = await loop.run_in_executor(executor, do_ai_analysis)
-        
-        # Create changelog entry
+
+        # Save changelog with AI analysis
         db = get_db()
-        changelog = ChangeLog(
-            database_id=database.id,
-            commit_sha=latest_commit.sha,
-            commit_date=latest_commit.date,
-            commit_message=latest_commit.message,
-            commit_url=latest_commit.url,
-            files_changed=len(diff_data.get('files', [])),
-            additions=latest_commit.additions,
-            deletions=latest_commit.deletions,
-            ai_summary=analysis.summary if analysis.success else None,
-            ai_details=analysis.details if analysis.success else None,
-            ai_provider=analysis.provider if analysis.success else None,
-            ai_model=analysis.model if analysis.success else None,
-            ai_generated_at=datetime.utcnow() if analysis.success else None,
-            ai_error=analysis.error if not analysis.success else None,
-            diff_patch=diff_data.get('full_patch', '')[:10000],  # Limit size
-            changed_items=diff_data.get('changed_items', []),
-        )
-        db.add(changelog)
-        db.commit()
-        db.close()
-        
-        if analysis.success:
-            logger.info(f"✓ AI changelog created for {database.name} ({analysis.provider}/{analysis.model})")
-        else:
-            logger.warning(f"AI changelog created but analysis failed: {analysis.error}")
-        
+        try:
+            changelog = ChangeLog(
+                database_id=database.id,
+                commit_sha=commit_full_sha,
+                commit_date=commit_date,
+                commit_message=commit_message,
+                commit_url='',  # Local git
+                files_changed=files_changed,
+                additions=additions,
+                deletions=deletions,
+                ai_summary=analysis.summary if analysis else None,
+                ai_details=analysis.details if analysis else None,
+            )
+            db.add(changelog)
+            db.commit()
+            logger.info(f"✓ AI Changelog created for {commit_short_sha}: {analysis.summary if analysis else 'No summary'}")
+        finally:
+            db.close()
+
     except Exception as e:
-        logger.error(f"Error generating AI changelog: {e}")
+        logger.error(f"Changelog generation failed: {e}")
         import traceback
         logger.error(traceback.format_exc())
-
-
-
 def create_database_panel(user, server, team, container):
     """
     Creates a refreshable database panel using @ui.refreshable.
@@ -422,39 +766,206 @@ def create_database_panel(user, server, team, container):
     
     # Store timer reference
     refresh_timer_holder = {'timer': None}
-    
+
+    # Holder for refreshable components (for selective refresh)
+    refresh_holder = {'progress': None, 'database_list': None}
+
+    # Dialog state tracker (pause refresh when dialog is open)
+    dialog_state = {'is_open': False}
+
+    # Load filter state from user preferences
+    db = get_db()
+    try:
+        from ..models.user_preference import UserPreference
+        pref = db.query(UserPreference).filter(UserPreference.user_id == user.id).first()
+        if pref and pref.preferences:
+            saved_filter = pref.preferences.get('sync_show_only_active_dbs', False)
+        else:
+            saved_filter = False  # Default: alle anzeigen
+    finally:
+        db.close()
+
+    # Filter checkbox state (shared across refreshes)
+    show_only_active_dbs = {'value': saved_filter}
+
+    # Refreshable progress box (separate from database list for performance)
+    @ui.refreshable
+    def progress_box():
+        """Show active documentation generations"""
+        if _doc_generating:
+            db = get_db()
+            try:
+                with ui.card().classes('w-full p-3 bg-purple-50 border-l-4 border-purple-500 mb-4'):
+                    with ui.row().classes('w-full items-center gap-3'):
+                        ui.spinner(size='md', color='purple')
+                        with ui.column().classes('flex-1'):
+                            ui.label('Dokumentation wird generiert:').classes('text-sm font-bold text-purple-900')
+                            for db_id, progress in _doc_generating.items():
+                                # Find database name
+                                db_obj = db.query(Database).filter(Database.id == db_id).first()
+                                if db_obj:
+                                    current = progress.get('current', 0)
+                                    total = progress.get('total', 1)
+                                    progress_text = f"{db_obj.name}"
+                                    if total > 1:
+                                        progress_text += f" (Batch {current}/{total})"
+                                    ui.label(progress_text).classes('text-xs text-purple-700')
+            finally:
+                db.close()
+
     @ui.refreshable
     def database_list():
         """Refreshable database list - call database_list.refresh() to update"""
         sync_manager = get_sync_manager()
         bulk_sync_active = sync_manager.is_bulk_sync_active(team.id)
-        
+
         db = get_db()
         try:
-            databases = db.query(Database).filter(
+            # Load all databases for this team
+            all_databases = db.query(Database).filter(
                 Database.team_id == team.id
             ).order_by(Database.name).all()
-            
+
+            # Filter based on checkbox
+            if show_only_active_dbs['value']:
+                databases = [d for d in all_databases if not d.is_excluded]
+            else:
+                databases = all_databases
+
             # Check sync status from DB
             syncing_count = sum(1 for d in databases if d.sync_status == SyncStatus.SYNCING.value)
             any_syncing = syncing_count > 0
             total_count = len([d for d in databases if not d.is_excluded])
             completed_count = total_count - syncing_count
             is_busy = bulk_sync_active or any_syncing
-            
-            if not databases:
+
+            # Auto-load only if NO databases exist in DB at all (not just filtered)
+            if not all_databases:
+                # Auto-load databases from server if none exist
+                auto_load_triggered = {'done': False}  # Flag to prevent loop
+
+                async def auto_load_databases():
+                    # Prevent multiple triggers
+                    if auto_load_triggered['done']:
+                        logger.info(f"Auto-load already triggered for {team.name}, skipping")
+                        return
+
+                    auto_load_triggered['done'] = True
+
+                    try:
+                        from ..services.ninox_sync_service import get_ninox_sync_service
+                        from ..api.ninox_client import NinoxClient
+                        from ..utils.encryption import get_encryption_manager
+
+                        logger.info(f"Auto-loading databases from server for team {team.name}...")
+
+                        # Get encryption manager
+                        enc = get_encryption_manager()
+
+                        # Get server from database
+                        db_conn = get_db()
+                        try:
+                            server_obj = db_conn.query(Server).filter(Server.id == server.id).first()
+                            if server_obj:
+                                api_key = enc.decrypt(server_obj.api_key_encrypted)
+                                client = NinoxClient(server_obj.url, api_key)
+
+                                # Fetch databases from Ninox
+                                databases_data = client.get_databases(team.team_id)
+
+                                # Save to database
+                                for db_data in databases_data:
+                                    db_id = db_data.get('id') or db_data.get('databaseId')
+                                    db_name = db_data.get('name', f'Database {db_id}')
+
+                                    if db_id:
+                                        # Check if exists
+                                        existing = db_conn.query(Database).filter(
+                                            Database.team_id == team.id,
+                                            Database.database_id == db_id
+                                        ).first()
+
+                                        if not existing:
+                                            new_db = Database(
+                                                team_id=team.id,
+                                                database_id=db_id,
+                                                name=db_name,
+                                                is_excluded=False  # Default: active (not excluded)
+                                            )
+                                            db_conn.add(new_db)
+
+                                db_conn.commit()
+                                logger.info(f"✓ Loaded {len(databases_data)} databases for {team.name}")
+
+                                ui.notify(f'✓ {len(databases_data)} Datenbanken vom Server geladen!', type='positive')
+
+                                # Refresh UI to show new databases
+                                load_databases(user, server, team, container, setup_refresh=False)
+                        finally:
+                            db_conn.close()
+
+                    except Exception as e:
+                        logger.error(f"Error auto-loading databases: {e}")
+                        ui.notify(f'Fehler beim Laden: {str(e)}', type='negative')
+
                 EmptyState.render(
                     icon='folder',
-                    title='No Databases',
-                    message='No databases found for this team. Sync the team first.',
-                    action_label='Go to Teams',
-                    on_action=lambda: ui.navigate.to('/teams')
+                    title='Keine Datenbanken',
+                    message='Keine Datenbanken für dieses Team gefunden. Lade automatisch vom Server...',
+                    action_label='Datenbanken laden',
+                    on_action=lambda: ui.timer(0.1, auto_load_databases, once=True)
+                )
+
+                # Auto-trigger loading (only once)
+                ui.timer(0.5, auto_load_databases, once=True)
+            elif not databases and all_databases:
+                # DBs exist but are filtered out
+                EmptyState.render(
+                    icon='filter_alt',
+                    title='Keine Datenbanken sichtbar',
+                    message=f'{len(all_databases)} Datenbanken sind ausgeblendet. Deaktivieren Sie den Filter "Nur aktive" oder aktivieren Sie die Datenbanken.',
+                    action_label='Filter deaktivieren',
+                    on_action=lambda: None  # Filter is already there
                 )
             else:
                 # Bulk actions header
                 with ui.row().classes('w-full items-center justify-between mb-4'):
                     with ui.row().classes('items-center gap-2'):
                         ui.label('Databases').classes('text-h6 font-bold')
+
+                        # Filter checkbox
+                        filter_checkbox = ui.checkbox(
+                            'Nur aktive',
+                            value=show_only_active_dbs['value']
+                        ).classes('ml-4')
+
+                        def on_filter_change():
+                            show_only_active_dbs['value'] = filter_checkbox.value
+
+                            # Save to user preferences
+                            db_pref = get_db()
+                            try:
+                                from ..models.user_preference import UserPreference
+                                pref = db_pref.query(UserPreference).filter(UserPreference.user_id == user.id).first()
+                                if pref:
+                                    if not pref.preferences:
+                                        pref.preferences = {}
+                                    pref.preferences['sync_show_only_active_dbs'] = filter_checkbox.value
+                                    db_pref.commit()
+                            finally:
+                                db_pref.close()
+
+                            database_list.refresh()
+
+                        filter_checkbox.on('update:model-value', on_filter_change)
+
+                        # Show count
+                        active_count = len([d for d in all_databases if not d.is_excluded])
+                        if show_only_active_dbs['value'] and active_count < len(all_databases):
+                            ui.label(f'({len(databases)} aktive von {len(all_databases)} gesamt)').classes('text-sm text-grey-7')
+                        else:
+                            ui.label(f'({len(databases)} gesamt)').classes('text-sm text-grey-7')
+
                         # Show different indicators for bulk sync vs individual sync
                         if bulk_sync_active:
                             # Bulk sync: show progress counter
@@ -464,12 +975,30 @@ def create_database_panel(user, server, team, container):
                             # Individual sync: just show how many are syncing
                             ui.spinner(size='sm', color='primary')
                             ui.label(f'{syncing_count} syncing...').classes('text-caption text-primary')
-                    
-                    ui.button(
-                        'Syncing...' if is_busy else 'Sync All',
-                        icon='sync',
-                        on_click=lambda: sync_all_databases(user, server, team, databases, container)
-                    ).props(f'color=primary {"loading disable" if is_busy else ""}')
+
+                    # Bulk actions row
+                    with ui.row().classes('gap-2'):
+                        # Bulk sync button
+                        ui.button(
+                            'Sync All YAML',
+                            icon='description',
+                            on_click=lambda: sync_all_yaml(user, server, team, databases, container)
+                        ).props(f'color=purple {"disable" if is_busy else ""}').tooltip(
+                            'Alle nicht-ausgeschlossenen Datenbanken als YAML synchronisieren'
+                        )
+
+                        # Bulk toggle buttons
+                        ui.button(
+                            'Auto-Doku: Alle An/Aus',
+                            icon='auto_awesome',
+                            on_click=lambda: toggle_all_auto_docs(user, server, team, database_list)
+                        ).props('flat dense color=purple').tooltip('Auto-Doku für alle DBs umschalten')
+
+                        ui.button(
+                            'Auto-ERD: Alle An/Aus',
+                            icon='account_tree',
+                            on_click=lambda: toggle_all_auto_erd(user, server, team, database_list)
+                        ).props('flat dense color=blue').tooltip('Auto-ERD für alle DBs umschalten')
 
                 # Database cards - pass bulk_sync_active, not is_busy
                 # Each card checks its own sync_status for spinner
@@ -480,10 +1009,15 @@ def create_database_panel(user, server, team, container):
             db.close()
     
     def check_and_refresh():
-        """Timer callback - check if still syncing and refresh"""
+        """Timer callback - check if still syncing/generating and refresh (skip if dialog open)"""
+        # Skip refresh if any dialog is open (global state)
+        if _dialog_open_state['count'] > 0:
+            logger.debug(f"Skipping refresh - {_dialog_open_state['count']} dialog(s) open")
+            return
+
         sync_manager = get_sync_manager()
         bulk_active = sync_manager.is_bulk_sync_active(team.id)
-        
+
         db = get_db()
         try:
             syncing_count = db.query(Database).filter(
@@ -493,25 +1027,58 @@ def create_database_panel(user, server, team, container):
             still_syncing = syncing_count > 0
         finally:
             db.close()
-        
+
+        # Check if any documentation is being generated
+        docs_generating = len(_doc_generating) > 0
+
+        # Check if force refresh is needed
+        force = _force_refresh['needed']
+
         if still_syncing or bulk_active:
-            # Still syncing - refresh the UI
-            logger.info(f"Auto-refresh: {syncing_count} still syncing, bulk={bulk_active}")
+            # Syncing - refresh full database list (to update sync status)
+            logger.info(f"Auto-refresh: syncing={syncing_count}, bulk={bulk_active}")
             database_list.refresh()
+        elif docs_generating or force:
+            # Doc generation - smart refresh (only when needed)
+            logger.info(f"Auto-refresh: docs_gen={len(_doc_generating)}, force={force}")
+
+            # Reset force flag
+            if force:
+                _force_refresh['needed'] = False
+
+            # Check if any batch count changed
+            current_state = {db_id: f"{p.get('current', 0)}/{p.get('total', 1)}" for db_id, p in _doc_generating.items()}
+            if not hasattr(check_and_refresh, '_last_doc_state'):
+                check_and_refresh._last_doc_state = {}
+
+            state_changed = current_state != check_and_refresh._last_doc_state
+            check_and_refresh._last_doc_state = current_state
+
+            # Refresh progress box (always)
+            if 'progress' in refresh_holder and refresh_holder['progress']:
+                refresh_holder['progress'].refresh()
+
+            # Refresh database list only when needed
+            if force or state_changed:
+                logger.info(f"Refreshing database list (force={force}, state_changed={state_changed})")
+                database_list.refresh()
+            else:
+                logger.debug("No changes - skipping database list refresh")
         else:
-            # Done - stop timer and do final refresh
-            logger.info("All syncs complete - stopping timer")
-            if refresh_timer_holder['timer']:
-                refresh_timer_holder['timer'].cancel()
-                refresh_timer_holder['timer'] = None
-            database_list.refresh()
+            # Nothing active - skip refresh
+            logger.debug("Auto-refresh: idle")
     
-    # Render initial database list
+    # Store refreshable components in holder
+    refresh_holder['progress'] = progress_box
+    refresh_holder['database_list'] = database_list
+
+    # Render initial components
     with container:
+        progress_box()  # Render progress box first (above database list)
         database_list()
-        
-        # Setup auto-refresh timer (always, will self-cancel when not needed)
-        refresh_timer_holder['timer'] = ui.timer(2.0, check_and_refresh)
+
+        # Setup auto-refresh timer (5s interval - less intrusive when viewing dialogs)
+        refresh_timer_holder['timer'] = ui.timer(5.0, check_and_refresh)
 
 
 def load_databases(user, server, team, container, setup_refresh=True):
@@ -547,14 +1114,33 @@ def render_database_card(user, server, team, database, container, bulk_sync_acti
                     
                     ui.label(database.name).classes('text-h6 font-bold')
 
+                    # Show status badges
+                    is_generating_docs = database.id in _doc_generating
+                    doc_progress = _doc_generating.get(database.id, {})
+
                     if database.is_excluded:
                         ui.badge('Excluded', color='warning')
                     elif is_syncing:
                         ui.badge('Syncing...', color='primary').props('outline')
+                    elif is_generating_docs:
+                        with ui.row().classes('items-center gap-1'):
+                            ui.spinner(size='xs', color='purple')
+                            progress_text = 'Generiert Doku...'
+                            if doc_progress.get('total', 0) > 1:
+                                # Show batch progress
+                                current = doc_progress.get('current', 0)
+                                total = doc_progress.get('total', 1)
+                                progress_text = f'Doku Batch {current}/{total}'
+                            ui.badge(progress_text, color='purple').props('outline')
                     elif has_error:
                         ui.badge('Error', color='negative')
 
-                ui.label(f'Database ID: {database.database_id}').classes('text-grey-7')
+                # Database ID and Server/Team info
+                with ui.row().classes('items-center gap-2 flex-wrap'):
+                    ui.label(f'ID: {database.database_id}').classes('text-grey-7 text-sm')
+                    ui.label('•').classes('text-grey-5 text-sm')
+                    ui.chip(f'{server.name}').props('dense outline color=grey-7').classes('text-xs')
+                    ui.chip(f'{team.name}').props('dense outline color=grey-7').classes('text-xs')
 
                 if database.github_path:
                     with ui.row().classes('items-center gap-2'):
@@ -565,7 +1151,64 @@ def render_database_card(user, server, team, database, container, bulk_sync_acti
                     ui.label(f'Last Modified: {format_datetime(database.last_modified)}').classes(
                         'text-grey-7'
                     )
-                
+
+                # Auto-generate ERD and docs checkboxes
+                def toggle_auto_erd(db_id, value):
+                    db_conn = get_db()
+                    try:
+                        db_obj = db_conn.query(Database).filter(Database.id == db_id).first()
+                        if db_obj:
+                            db_obj.auto_generate_erd = value
+                            db_conn.commit()
+                    finally:
+                        db_conn.close()
+
+                def toggle_auto_docs(db_id, value):
+                    db_conn = get_db()
+                    try:
+                        db_obj = db_conn.query(Database).filter(Database.id == db_id).first()
+                        if db_obj:
+                            db_obj.auto_generate_docs = value
+                            db_conn.commit()
+                    finally:
+                        db_conn.close()
+
+                with ui.row().classes('items-center gap-4 mt-1 flex-wrap'):
+                    # Auto-ERD checkbox
+                    with ui.row().classes('items-center gap-2'):
+                        ui.icon('account_tree', size='xs').classes('text-blue')
+                        auto_erd_cb = ui.checkbox(
+                            'Auto-ERD',
+                            value=database.auto_generate_erd if hasattr(database, 'auto_generate_erd') else True
+                        ).classes('text-xs')
+                        auto_erd_cb.on('update:model-value', lambda e, db_id=database.id: toggle_auto_erd(db_id, auto_erd_cb.value))
+                        auto_erd_cb.tooltip('Automatische ERD-Generierung beim Sync (kostenlos)')
+
+                    # Auto-Doku checkbox
+                    with ui.row().classes('items-center gap-2'):
+                        ui.icon('auto_awesome', size='xs').classes('text-purple')
+                        auto_docs_cb = ui.checkbox(
+                            'Auto-Doku (AI)',
+                            value=database.auto_generate_docs
+                        ).classes('text-xs')
+                        auto_docs_cb.on('update:model-value', lambda e, db_id=database.id: toggle_auto_docs(db_id, auto_docs_cb.value))
+                        auto_docs_cb.tooltip('Automatische AI-Dokumentation beim Sync generieren')
+
+                # Show documentation status (generation + BookStack sync)
+                with ui.column().classes('gap-1 mt-1'):
+                    # Show last documentation generation
+                    latest_doc = database.latest_documentation if hasattr(database, 'latest_documentation') else None
+                    if latest_doc and hasattr(latest_doc, 'generated_at') and latest_doc.generated_at:
+                        with ui.row().classes('items-center gap-1'):
+                            ui.icon('description', size='xs').classes('text-purple')
+                            ui.label(f'Doku generiert: {format_datetime(latest_doc.generated_at)}').classes('text-xs text-grey-7')
+
+                    # Show last BookStack sync
+                    if hasattr(database, 'last_bookstack_sync') and database.last_bookstack_sync:
+                        with ui.row().classes('items-center gap-1'):
+                            ui.icon('cloud_done', size='xs').classes('text-green')
+                            ui.label(f'BookStack: {format_datetime(database.last_bookstack_sync)}').classes('text-xs text-grey-7')
+
                 # Show error message if sync failed
                 if has_error and database.sync_error:
                     with ui.row().classes('items-center gap-1'):
@@ -574,856 +1217,960 @@ def render_database_card(user, server, team, database, container, bulk_sync_acti
 
             # Actions
             with ui.column().classes('gap-2'):
+                # Einzelne Sync-Buttons entfernt - nur "Sync All YAML" wird verwendet
+                # Grund: Alle DBs sind verknüpft, einzelnes Syncen führt zu Inkonsistenzen
+
+                # YAML-based action buttons (always available after YAML sync)
                 if not database.is_excluded:
-                    # Disable sync button if already syncing or bulk sync active
-                    btn_label = 'Syncing...' if is_syncing else ('Waiting...' if bulk_sync_active else 'Sync Now')
-                    sync_btn = ui.button(
-                        btn_label,
-                        icon='sync',
-                        on_click=lambda d=database: handle_sync_click(user, server, team, d, container)
-                    ).props(f'flat dense color=primary {"loading disable" if sync_disabled else ""}')
-
-                if database.github_path and user.github_organization:
-                    # View Structure button - opens JSON viewer dialog
-                    ui.button(
-                        'View JSON',
-                        icon='data_object',
-                        on_click=lambda s=server, t=team, d=database: show_json_viewer_from_sync(user, s, t, d)
-                    ).props('flat dense color=primary')
-
-                    # View ERD button - opens SVG viewer dialog
-                    ui.button(
-                        'View ERD',
-                        icon='account_tree',
-                        on_click=lambda s=server, t=team, d=database: show_erd_viewer_dialog(user, s, t, d)
-                    ).props('flat dense color=secondary')
-                    
-                    # Timeline button - shows change history
-                    ui.button(
-                        'Timeline',
-                        icon='timeline',
-                        on_click=lambda d=database: show_database_timeline_dialog(d)
-                    ).props('flat dense color=info')
-                    
-                    # Documentation button - generates AI documentation
-                    ui.button(
-                        'Doku',
-                        icon='description',
-                        on_click=lambda s=server, t=team, d=database: show_documentation_dialog(user, s, t, d)
-                    ).props('flat dense color=purple')
-                    
-                    # Upload Drive button - only for OAuth users when Drive is enabled
-                    from ..services.drive_service import is_drive_enabled
-                    if user.auth_provider == 'google' and is_drive_enabled():
+                    with ui.row().classes('gap-1'):
+                        # View ERD button - opens YAML-based ERD dialog
                         ui.button(
-                            'Upload Drive',
-                            icon='cloud_upload',
-                            on_click=lambda s=server, t=team, d=database: show_upload_drive_dialog(user, s, t, d)
-                        ).props('flat dense color=teal')
+                            'View ERD',
+                            icon='account_tree',
+                            on_click=lambda d=database: show_yaml_erd_from_sync(d)
+                        ).props('flat dense color=secondary').tooltip('Entity Relationship Diagram')
 
-                    # GitHub link to folder - get repo name from server
-                    github_repo_name = get_repo_name_from_server(server)
-                    github_url = f'https://github.com/{user.github_organization}/{github_repo_name}/tree/main/{database.github_path}'
-                    ui.button(
-                        'GitHub',
-                        icon='open_in_new',
-                        on_click=lambda url=github_url: ui.navigate.to(url, new_tab=True)
-                    ).props('flat dense')
+                        # Timeline button - shows YAML/Git change history
+                        ui.button(
+                            'Timeline',
+                            icon='timeline',
+                            on_click=lambda d=database: show_yaml_timeline_from_sync(d)
+                        ).props('flat dense color=info').tooltip('Git Änderungshistorie')
+
+                        # Generate Documentation button - triggers AI doc generation
+                        is_generating = database.id in _doc_generating
+                        gen_btn = ui.button(
+                            'Generiert...' if is_generating else 'GEN DOKU',
+                            icon='hourglass_empty' if is_generating else 'auto_awesome',
+                            on_click=lambda d=database: generate_documentation_for_database(d, user, server, team, container)
+                        ).props(f'flat dense color=purple {"loading" if is_generating else ""}')
+                        gen_btn.tooltip('Dokumentation wird generiert...' if is_generating else 'Dokumentation mit AI generieren (im Hintergrund)')
+
+                        # View Documentation button - shows the generated APPLICATION_DOCS.md
+                        ui.button(
+                            'VIEW DOKU',
+                            icon='description',
+                            on_click=lambda d=database: show_documentation_viewer(d, user, server)
+                        ).props('flat dense color=deep-purple').tooltip('Dokumentation anzeigen')
+
+                        # BookStack sync button - transfer docs to BookStack
+                        has_bookstack = database.bookstack_book_id is not None if hasattr(database, 'bookstack_book_id') else False
+                        ui.button(
+                            '→ BOOKSTACK',
+                            icon='cloud_upload' if not has_bookstack else 'cloud_done',
+                            on_click=lambda d=database: sync_to_bookstack(d, user, server, team)
+                        ).props(f'flat dense color={"purple" if not has_bookstack else "green"}').tooltip(
+                            'Zu BookStack übertragen' if not has_bookstack else 'In BookStack aktualisieren'
+                        )
+
+                        # VIEW CODE button - navigates to YAML Code Viewer
+                        ui.button(
+                            'VIEW CODE',
+                            icon='code',
+                            on_click=lambda: ui.navigate.to('/yaml-code-viewer')
+                        ).props('flat dense color=blue').tooltip('YAML Code durchsuchen')
+
+                        # GitHub link to repository - using new clear name structure
+                        from ..utils.github_utils import sanitize_name
+                        github_repo_name = get_repo_name_from_server(server)
+                        github_path = f"{sanitize_name(database.team.name)}/{sanitize_name(database.name)}"
+                        github_url = f'https://github.com/{user.github_organization}/{github_repo_name}/tree/main/{github_path}'
+                        ui.button(
+                            'GITHUB',
+                            icon='open_in_new',
+                            on_click=lambda url=github_url: ui.navigate.to(url, new_tab=True)
+                        ).props('flat dense')
 
                 if database.is_excluded:
+                    # Include with dependencies (smart button)
                     ui.button(
-                        'Include',
+                        'Include + Abhängigkeiten',
+                        icon='link',
+                        on_click=lambda d=database: include_with_dependencies(
+                            user, server, team, d, container
+                        )
+                    ).props('flat dense color=positive').tooltip('Datenbank mit allen Abhängigkeiten aktivieren')
+
+                    # Simple include (without dependencies)
+                    ui.button(
+                        'Nur Include',
                         icon='add_circle',
                         on_click=lambda d=database: toggle_database_exclusion(
                             user, d, False, container
                         )
-                    ).props('flat dense color=positive')
+                    ).props('flat dense outline color=positive').tooltip('Nur diese Datenbank aktivieren')
                 else:
+                    # Exclude with dependents (smart button)
                     ui.button(
-                        'Exclude',
+                        'Exclude + Abhängige',
+                        icon='link_off',
+                        on_click=lambda d=database: exclude_with_dependents(
+                            user, server, team, d, container
+                        )
+                    ).props('flat dense color=warning').tooltip('Datenbank mit allen abhängigen DBs deaktivieren')
+
+                    # Simple exclude (without dependents)
+                    ui.button(
+                        'Nur Exclude',
                         icon='block',
                         on_click=lambda d=database: toggle_database_exclusion(
                             user, d, True, container
                         )
-                    ).props('flat dense color=warning')
+                    ).props('flat dense outline color=warning').tooltip('Nur diese Datenbank deaktivieren')
 
 
-def handle_sync_click(user, server, team, database, container):
-    """
-    Handle sync button click - starts background sync.
-    Sync continues even if user leaves the page.
-    Blocked if bulk sync is active for this team.
-    """
-    import logging
-    from ..services.background_sync import get_sync_manager
-    from ..models.database import SyncStatus
-    
-    logger = logging.getLogger(__name__)
-    
-    # Get sync manager
-    sync_manager = get_sync_manager()
-    
-    # Check if bulk sync is active for this team
-    if sync_manager.is_bulk_sync_active(team.id):
-        Toast.warning('Bulk sync in progress - please wait until it completes')
-        return
-    
-    # Check if already syncing
-    if sync_manager.is_syncing(database.id):
-        Toast.warning(f'Database "{database.name}" is already syncing')
-        return
-    
-    # Start background sync
-    started = sync_manager.start_sync(user, server, team, database)
-    
-    if started:
-        Toast.info(f'Sync started for "{database.name}" - runs in background')
-        logger.info(f"Background sync started for {database.name}")
-        
-        # Reload databases to show spinner
-        load_databases(user, server, team, container)
-    else:
-        Toast.warning(f'Could not start sync for "{database.name}"')
+def open_yaml_code_viewer_for_database(database: Database):
+    """Open YAML Code Viewer filtered to specific database"""
+    ui.open(f'/yaml-code-viewer?db={database.database_id}')
 
 
-async def sync_database(user, server, team, database, container, progress_label=None, already_syncing=None):
-    """
-    Sync a single database - includes Schema, Views, Reports, and Report Files.
-    
-    Also syncs linked external databases first to ensure their structure is available
-    for resolving table/field names in the Markdown documentation.
-    
-    Args:
-        user: Current user
-        server: Server model
-        team: Team model
-        database: Database model
-        container: UI container for updates
-        progress_label: Optional label to show progress
-        already_syncing: Set of database_ids currently being synced (for loop protection)
-    """
+def show_documentation_viewer(database, user, server):
+    """Show documentation viewer dialog with APPLICATION_DOCS.md content"""
+    from ..utils.path_resolver import get_database_path
+    from ..utils.github_utils import sanitize_name
     import logging
     logger = logging.getLogger(__name__)
-    
-    # Initialize loop protection set
-    if already_syncing is None:
-        already_syncing = set()
-    
-    # Check if we're already syncing this database (loop protection)
-    if database.database_id in already_syncing:
-        logger.info(f"Skipping {database.name} - already syncing (loop protection)")
-        return
+    db_path = get_database_path(server, database.team, database.name)
+    db_subfolder = f"database_{sanitize_name(database.name)}"
+    docs_file = db_path / "src" / "Objects" / db_subfolder / "APPLICATION_DOCS.md"
+    with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width: 1200px; max-height: 90vh;"):
+        with ui.row().classes("w-full items-center justify-between p-4 bg-purple text-white"):
+            with ui.column().classes("gap-0"):
+                ui.label(f"Dokumentation: {database.name}").classes("text-h5 font-bold")
+                ui.label(f"{server.name} / {database.team.name}").classes("text-sm opacity-80")
+            ui.button(icon="close", on_click=dialog.close).props("flat color=white round")
+        with ui.column().classes("w-full p-4").style("max-height: 75vh; overflow-y: auto;"):
+            if docs_file.exists():
+                try:
+                    with open(docs_file, "r", encoding="utf-8") as f:
+                        markdown_content = f.read()
+                    ui.markdown(markdown_content).classes("w-full")
+                except Exception as e:
+                    ui.label(f"Fehler: {str(e)}").classes("text-negative")
+            else:
+                with ui.column().classes("items-center gap-4 p-8"):
+                    ui.icon("description", size="64px", color="grey")
+                    ui.label("Keine Dokumentation vorhanden").classes("text-h6 text-grey-7")
+    dialog.open()
 
-    try:
-        logger.info(f"=== SYNC START === Database: {database.name} (id={database.id})")
+
+def show_yaml_erd_from_sync(database: Database):
+    """Show ERD dialog for YAML database from sync page"""
+    from ..utils.ninox_yaml_parser import NinoxYAMLParser
+    from ..services.ninox_cli_service import get_ninox_cli_service
+    # Removed: convert_yaml_to_json_structure (no longer needed)
+    from ..utils.svg_erd_generator import generate_svg_erd
+
+    # Mark dialog as open (prevents auto-refresh)
+    _dialog_open_state['count'] += 1
+
+    def on_dialog_close():
+        _dialog_open_state['count'] -= 1
+        dialog.close()
+
+    with ui.dialog() as dialog, ui.card().classes('w-full').style('max-width: 95vw; max-height: 95vh;'):
+        with ui.row().classes('w-full items-center justify-between mb-4'):
+            with ui.column().classes('gap-0'):
+                ui.label(f'ERD: {database.name}').classes('text-h5 font-bold')
+                ui.label(f'Database: {database.database_id}').classes('text-grey-7')
+            ui.button(icon='close', on_click=on_dialog_close).props('flat round dense')
+
+        erd_container = ui.column().classes('w-full').style('height: 80vh; overflow: hidden;')
+
+        with erd_container:
+            status_label = ui.label('Loading YAML database...').classes('text-h6')
+            ui.spinner('dots', size='lg')
+
+        dialog.open()
         
-        # Add this database to the syncing set
-        already_syncing.add(database.database_id)
-
-        # Step 1: Decrypt credentials
-        if progress_label:
-            progress_label.text = 'Decrypting credentials...'
-            await asyncio.sleep(0.1)
-
-        encryption = get_encryption_manager()
-        api_key = encryption.decrypt(server.api_key_encrypted)
-
-        # Step 2: Connect to Ninox
-        if progress_label:
-            progress_label.text = 'Connecting to Ninox server...'
-            await asyncio.sleep(0.1)
-
-        client = NinoxClient(server.url, api_key)
-
-        # Step 3: Fetch database structure
-        if progress_label:
-            progress_label.text = 'Downloading database structure...'
-            await asyncio.sleep(0.1)
-
-        logger.info(f"Fetching structure from Ninox...")
-        # Run in executor to avoid blocking UI
-        loop = asyncio.get_event_loop()
-        db_structure = await loop.run_in_executor(
-            None,
-            client.get_database_structure,
-            team.team_id,
-            database.database_id
-        )
-        logger.info(f"Structure fetched: {len(str(db_structure))} chars")
-
-        # Step 3a: Sync linked external databases first (for MD name resolution)
-        known_dbs = db_structure.get('schema', {}).get('knownDatabases', [])
-        if known_dbs:
-            logger.info(f"Found {len(known_dbs)} external database links")
-            
-            # Get all databases in this team from our system
-            db_session = get_db()
+        async def load_erd():
             try:
-                team_databases = db_session.query(Database).filter(
-                    Database.team_id == team.id
-                ).all()
-                
-                # Create mapping: ninox_database_id -> Database model
-                db_by_ninox_id = {db.database_id: db for db in team_databases}
-                
-                for ext_db_info in known_dbs:
-                    ext_db_id = ext_db_info.get('dbId')
-                    ext_db_name = ext_db_info.get('name', ext_db_id)
-                    
-                    if ext_db_id and ext_db_id not in already_syncing:
-                        # Check if this external DB exists in our system
-                        linked_db = db_by_ninox_id.get(ext_db_id)
-                        
-                        if linked_db:
-                            logger.info(f"Syncing linked database: {ext_db_name} (ID: {ext_db_id})")
-                            if progress_label:
-                                progress_label.text = f'Syncing linked DB: {ext_db_name}...'
-                                await asyncio.sleep(0.1)
-                            
-                            try:
-                                # Recursively sync the linked database
-                                await sync_database(
-                                    user, server, team, linked_db, container,
-                                    progress_label=None,  # Don't update progress for sub-syncs
-                                    already_syncing=already_syncing
-                                )
-                                logger.info(f"Linked database synced: {ext_db_name}")
-                            except Exception as link_err:
-                                logger.warning(f"Could not sync linked DB {ext_db_name}: {link_err}")
-                                # Continue with main sync even if linked DB fails
-                        else:
-                            logger.info(f"Linked DB {ext_db_name} (ID: {ext_db_id}) not found in our system - skipping")
-                    elif ext_db_id in already_syncing:
-                        logger.info(f"Linked DB {ext_db_name} already being synced - skipping (loop protection)")
-            finally:
-                db_session.close()
-            
-            if progress_label:
-                progress_label.text = f'Continuing sync of {database.name}...'
-                await asyncio.sleep(0.1)
+                import logging
+                from ..utils.path_resolver import get_team_path, get_database_path
+                from ..models.server import Server
+                from ..models.team import Team
 
-        # Step 3b: Fetch Views (Ansichten)
-        if progress_label:
-            progress_label.text = 'Downloading views...'
-            await asyncio.sleep(0.1)
+                logger = logging.getLogger(__name__)
 
-        views_data = []
-        try:
-            logger.info(f"Fetching views from Ninox...")
-            views_data = await loop.run_in_executor(
-                None,
-                client.get_views,
-                team.team_id,
-                database.database_id,
-                True  # full_view=True
-            )
-            logger.info(f"Views fetched: {len(views_data)} views")
-        except Exception as e:
-            logger.warning(f"Could not fetch views: {e}")
-            views_data = []
-
-        # Step 3c: Fetch Reports (Berichte)
-        if progress_label:
-            progress_label.text = 'Downloading reports...'
-            await asyncio.sleep(0.1)
-
-        reports_data = []
-        report_files_data = {}
-        try:
-            logger.info(f"Fetching reports from Ninox...")
-            reports_data = await loop.run_in_executor(
-                None,
-                client.get_reports,
-                team.team_id,
-                database.database_id,
-                True  # full_report=True
-            )
-            logger.info(f"Reports fetched: {len(reports_data)} reports")
-
-            # Step 3d: Fetch Report Files for each report
-            if reports_data:
-                if progress_label:
-                    progress_label.text = 'Downloading report files...'
-                    await asyncio.sleep(0.1)
-
-                for report in reports_data:
-                    report_id = report.get('id')
-                    if report_id:
-                        try:
-                            files = await loop.run_in_executor(
-                                None,
-                                client.get_report_files,
-                                team.team_id,
-                                database.database_id,
-                                str(report_id)
-                            )
-                            if files:
-                                report_files_data[str(report_id)] = files
-                                logger.info(f"Report {report_id} has {len(files)} files")
-                        except Exception as e:
-                            logger.warning(f"Could not fetch files for report {report_id}: {e}")
-
-        except Exception as e:
-            logger.warning(f"Could not fetch reports: {e}")
-            reports_data = []
-
-        # Check if GitHub is configured (now in user, not server)
-        if user.github_token_encrypted and user.github_organization:
-            if progress_label:
-                progress_label.text = 'Preparing GitHub upload...'
-                await asyncio.sleep(0.1)
-
-            github_token = encryption.decrypt(user.github_token_encrypted)
-
-            # Use helper function to get repo name from server
-            repo_name = get_repo_name_from_server(server)
-
-            # Create GitHub manager
-            github_mgr = GitHubManager(
-                access_token=github_token,
-                organization=user.github_organization
-            )
-
-            # Step 4: Ensure repository exists
-            if progress_label:
-                progress_label.text = f'Creating/checking repository "{repo_name}"...'
-                await asyncio.sleep(0.1)
-
-            repo = github_mgr.ensure_repository(
-                repo_name=repo_name,
-                description=f'Ninox database backups from {server.name} ({server.url})'
-            )
-            logger.info(f"Repository ready: {repo_name}")
-
-            # Create path structure:
-            # - team-name/db-name.md (MD directly visible under team)
-            # - team-name/db-name/structure.json (details in subfolder)
-            team_name = sanitize_name(team.name)
-            db_name = sanitize_name(database.name)
-
-            github_path = f'{team_name}/{db_name}'  # Subfolder for details
-            full_path = f'{github_path}/structure.json'
-
-            # Step 5: Convert to JSON and create complete backup object
-            if progress_label:
-                progress_label.text = 'Converting to JSON format...'
-                await asyncio.sleep(0.1)
-
-            # Create complete backup structure (like Updatemanager)
-            complete_backup = {
-                'schema': db_structure,
-                'views': views_data,
-                'reports': reports_data,
-                'report_files': report_files_data,
-                '_metadata': {
-                    'synced_at': datetime.utcnow().isoformat(),
-                    'database_name': database.name,
-                    'database_id': database.database_id,
-                    'team_name': team.name,
-                    'team_id': team.team_id,
-                    'server_name': server.name,
-                    'views_count': len(views_data),
-                    'reports_count': len(reports_data),
-                    'report_files_count': sum(len(f) for f in report_files_data.values())
-                }
-            }
-
-            structure_json = json.dumps(db_structure, indent=2, ensure_ascii=False)
-            logger.info(f"JSON size: {len(structure_json)} bytes")
-
-            # Step 6: Upload structure to GitHub
-            if progress_label:
-                progress_label.text = f'Uploading structure to GitHub: {full_path}...'
-                await asyncio.sleep(0.1)
-
-            # Upload to GitHub in executor
-            await loop.run_in_executor(
-                None,
-                github_mgr.update_file,
-                repo,
-                full_path,
-                structure_json,
-                f'Update {database.name} structure from {team.name}'
-            )
-            logger.info(f"Uploaded to GitHub: {full_path}")
-
-            # Step 6b: Upload Views if available (into subfolder)
-            if views_data:
-                if progress_label:
-                    progress_label.text = 'Uploading views...'
-                    await asyncio.sleep(0.1)
-
-                views_path = f'{github_path}/views.json'
-                views_json = json.dumps(views_data, indent=2, ensure_ascii=False)
-                
+                # Load server in new session (database object might be detached)
+                db = get_db()
                 try:
-                    await loop.run_in_executor(
-                        None,
-                        github_mgr.update_file,
-                        repo,
-                        views_path,
-                        views_json,
-                        f'Update {database.name} views'
-                    )
-                    logger.info(f"Uploaded views to GitHub: {views_path}")
-                except Exception as e:
-                    logger.error(f"Failed to upload views: {e}")
+                    team = db.query(Team).filter(Team.id == database.team.id).first()
+                    server = db.query(Server).filter(Server.id == team.server_id).first()
+                finally:
+                    db.close()
 
-            # Step 6c: Upload Reports if available (into subfolder)
-            if reports_data:
-                if progress_label:
-                    progress_label.text = 'Uploading reports...'
-                    await asyncio.sleep(0.1)
+                # Use database path with clear names
+                cli_service = get_ninox_cli_service()
+                db_path = get_database_path(server, database.team, database.name)
 
-                reports_path = f'{github_path}/reports.json'
-                reports_json = json.dumps(reports_data, indent=2, ensure_ascii=False)
+                # Check if pre-generated ERD exists (new structure with database subfolder)
+                from ..utils.github_utils import sanitize_name
+                db_subfolder = f"database_{sanitize_name(database.name)}"
+                erd_file = db_path / 'src' / 'Objects' / db_subfolder / 'erd.svg'
+
+                if erd_file.exists():
+                    # Load pre-generated ERD (instant!)
+                    status_label.text = 'Lade gespeichertes ERD...'
+                    with open(erd_file, 'r', encoding='utf-8') as f:
+                        svg_content = f.read()
+                    logger.info(f"✓ Loaded pre-generated ERD from {erd_file}")
+                else:
+                    # Generate on-the-fly (fallback)
+                    logger.info(f"Pre-generated ERD not found, generating now...")
+                    parser = NinoxYAMLParser(str(db_path))
+
+                    status_label.text = 'Finding database...'
+                    databases = parser.get_all_databases()
+
+                    if not databases:
+                        raise Exception(
+                            f"Database not found.\n"
+                            f"Database: {database.name}\n"
+                            f"Path: {db_path}\n"
+                            f"Bitte synchronisieren Sie die Datenbank zuerst mit 'Sync All YAML'."
+                        )
+
+                    yaml_db = databases[0]
+
+                    status_label.text = 'Generating diagram...'
+                    svg_content = generate_svg_erd(yaml_db)
                 
-                try:
-                    await loop.run_in_executor(
-                        None,
-                        github_mgr.update_file,
-                        repo,
-                        reports_path,
-                        reports_json,
-                        f'Update {database.name} reports'
-                    )
-                    logger.info(f"Uploaded reports to GitHub: {reports_path}")
-                except Exception as e:
-                    logger.error(f"Failed to upload reports: {e}")
-
-            # Step 6d: Upload complete backup JSON (into subfolder)
-            if progress_label:
-                progress_label.text = 'Uploading complete backup...'
-                await asyncio.sleep(0.1)
-
-            backup_path = f'{github_path}/complete-backup.json'
-            backup_json = json.dumps(complete_backup, indent=2, ensure_ascii=False)
-            
-            try:
-                await loop.run_in_executor(
-                    None,
-                    github_mgr.update_file,
-                    repo,
-                    backup_path,
-                    backup_json,
-                    f'Update {database.name} complete backup (schema + views + reports)'
-                )
-                logger.info(f"Uploaded complete backup to GitHub: {backup_path}")
-            except Exception as e:
-                logger.error(f"Failed to upload complete backup: {e}")
-
-            # Step 6d-2: Generate and upload Markdown documentation
-            if progress_label:
-                progress_label.text = 'Generating Markdown documentation...'
-                await asyncio.sleep(0.1)
-
-            # Load external database structures from local files (synced earlier in cascade)
-            # Initialize outside try block so it's available for local save later
-            external_db_structures = {}
-            
-            try:
-                known_dbs = db_structure.get('schema', {}).get('knownDatabases', [])
+                if not svg_content or '<svg' not in svg_content:
+                    raise Exception("SVG generation failed")
                 
-                if known_dbs:
-                    if progress_label:
-                        progress_label.text = f'Loading {len(known_dbs)} external database structures from local files...'
-                        await asyncio.sleep(0.1)
+                erd_container.clear()
+                
+                with erd_container:
+                    with ui.row().classes('w-full items-center gap-2 mb-2'):
+                        ui.label('Zoom:').classes('text-sm')
+                        ui.button('-', on_click=lambda: zoom_svg(-0.1)).props('dense flat')
+                        ui.button('+', on_click=lambda: zoom_svg(0.1)).props('dense flat')
+                        ui.button('Reset', on_click=lambda: reset_svg()).props('dense flat')
                     
-                    # Get all databases in this team to find local file paths
-                    db_session = get_db()
-                    try:
-                        team_databases = db_session.query(Database).filter(
-                            Database.team_id == team.id
-                        ).all()
-                        db_by_ninox_id = {db.database_id: db for db in team_databases}
-                    finally:
-                        db_session.close()
+                    svg_viewer = ui.html('', sanitize=False).classes('w-full').style('height: 70vh; overflow: auto; border: 1px solid #ccc; background: white;')
+                    svg_html = f'<div id="svg-wrapper" style="transform: scale(1); transform-origin: top left; transition: transform 0.2s;">{svg_content}</div>'
+                    svg_viewer.content = svg_html
                     
-                    import os
-                    server_name_safe = sanitize_name(server.name)
-                    team_name_safe = sanitize_name(team.name)
-                    
-                    for ext_db in known_dbs:
-                        ext_db_id = ext_db.get('dbId')
-                        ext_db_name = ext_db.get('name', ext_db_id)
-                        
-                        if ext_db_id:
-                            # Try to load from local file (should exist if cascade sync worked)
-                            linked_db = db_by_ninox_id.get(ext_db_id)
-                            if linked_db:
-                                try:
-                                    ext_db_name_safe = sanitize_name(linked_db.name)
-                                    ext_local_path = f'/app/data/code/{server_name_safe}/{team_name_safe}/{ext_db_name_safe}/complete-backup.json'
+                    # Add mouse wheel zoom functionality
+                    ui.run_javascript('''
+                        const svgViewer = document.querySelector('.q-page');
+                        if (svgViewer) {
+                            svgViewer.addEventListener('wheel', function(e) {
+                                // Check if Cmd (Mac) or Ctrl (Windows/Linux) is pressed
+                                if (e.metaKey || e.ctrlKey) {
+                                    e.preventDefault();
                                     
-                                    if os.path.exists(ext_local_path):
-                                        with open(ext_local_path, 'r', encoding='utf-8') as f:
-                                            ext_backup = json.load(f)
-                                        external_db_structures[ext_db_id] = ext_backup
-                                        logger.info(f"Loaded external DB structure from local file: {ext_db_name}")
-                                    else:
-                                        logger.warning(f"Local file not found for external DB {ext_db_name}: {ext_local_path}")
-                                except Exception as ext_err:
-                                    logger.warning(f"Could not load external DB {ext_db_name} from local file: {ext_err}")
-                            else:
-                                logger.info(f"External DB {ext_db_name} (ID: {ext_db_id}) not in our system - using IDs")
+                                    const wrapper = document.getElementById('svg-wrapper');
+                                    if (!wrapper) return;
+                                    
+                                    const currentScale = parseFloat(wrapper.style.transform.match(/scale\\(([^)]+)\\)/)?.[1] || 1);
+                                    
+                                    // Determine zoom direction (negative deltaY = zoom in)
+                                    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+                                    const newScale = Math.max(0.1, Math.min(5, currentScale + delta));
+                                    
+                                    wrapper.style.transform = `scale(${newScale})`;
+                                }
+                            }, { passive: false });
+                        }
+                    ''')
+                    
+                    def zoom_svg(delta):
+                        ui.run_javascript(f'''
+                            const wrapper = document.getElementById('svg-wrapper');
+                            const currentScale = parseFloat(wrapper.style.transform.match(/scale\\(([^)]+)\\)/)?.[1] || 1);
+                            const newScale = Math.max(0.1, Math.min(5, currentScale + {delta}));
+                            wrapper.style.transform = `scale(${{newScale}})`;
+                        ''')
+                    
+                    def reset_svg():
+                        ui.run_javascript('document.getElementById("svg-wrapper").style.transform = "scale(1)";')
+                    
+                    # Add keyboard shortcuts for zoom
+                    ui.keyboard(on_key=lambda e: zoom_svg(0.1) if e.key == '+' or e.key == '=' else 
+                                                  zoom_svg(-0.1) if e.key == '-' else 
+                                                  reset_svg() if e.key == '0' else None)
                 
-                # Generate Markdown from complete backup
-                logger.info(f"Generating Markdown documentation for {database.name}...")
-                md_content = generate_markdown_from_backup(complete_backup, database.name, external_db_structures)
+                ui.notify('ERD generiert - Zoom: Cmd/Ctrl+Mausrad, +/- oder 0', type='positive')
                 
-                if md_content:
-                    logger.info(f"Generated Markdown: {len(md_content)} bytes")
-                    
-                    # Upload Markdown file DIRECTLY under team folder (not in subfolder)
-                    # This makes the MD file more visible in the GitHub tree
-                    md_path = f'{team_name}/{db_name}.md'
-                    
-                    if progress_label:
-                        progress_label.text = 'Uploading Markdown documentation...'
-                        await asyncio.sleep(0.1)
-                    
-                    await loop.run_in_executor(
-                        None,
-                        github_mgr.update_file,
-                        repo,
-                        md_path,
-                        md_content,
-                        f'Update {database.name} Markdown documentation'
-                    )
-                    logger.info(f"Uploaded Markdown to GitHub: {md_path}")
-                else:
-                    logger.warning(f"Markdown generation returned empty for {database.name}")
-                    
             except Exception as e:
-                logger.error(f"Failed to generate/upload Markdown for {database.name}: {e}")
                 import traceback
-                logger.error(f"Markdown error traceback:\n{traceback.format_exc()}")
-                # Don't fail the whole sync if Markdown generation fails
+                logger = logging.getLogger(__name__)
+                logger.error(f"ERD error: {e}\n{traceback.format_exc()}")
+                
+                erd_container.clear()
+                with erd_container:
+                    ui.icon('error', size='64px', color='negative')
+                    ui.label('Error Generating ERD').classes('text-h6 text-negative')
+                    ui.label(str(e)).classes('text-grey-7')
+                ui.notify(f'Error: {e}', type='negative')
+        
+        ui.timer(0.1, load_erd, once=True)
 
-            # Step 6e: Generate and upload SVG ERD diagram
-            if progress_label:
-                progress_label.text = 'Generating ERD diagram...'
-                await asyncio.sleep(0.1)
 
+def show_yaml_timeline_from_sync(database: Database):
+    """Show Git timeline for YAML database"""
+    from ..services.ninox_cli_service import get_ninox_cli_service
+    from ..services.ninox_sync_service import get_git_log, get_commit_diff
+    
+    with ui.dialog() as dialog, ui.card().classes('w-full p-0').style('max-width: 900px; max-height: 90vh;'):
+        with ui.row().classes('w-full items-center justify-between p-4 bg-purple'):
+            with ui.row().classes('items-center gap-3'):
+                ui.icon('timeline', size='md', color='white')
+                ui.label(f'Timeline: {database.name}').classes('text-h5 font-bold text-white')
+            ui.button(icon='close', on_click=dialog.close).props('flat round dense color=white')
+        
+        timeline_container = ui.scroll_area().classes('w-full').style('height: calc(90vh - 80px);')
+        
+        with timeline_container:
+            status_label = ui.label('Loading...').classes('text-h6 p-4')
+            ui.spinner('dots', size='lg').classes('mx-4')
+        
+        dialog.open()
+        
+        async def load_timeline():
             try:
-                # Generate SVG ERD
-                logger.info(f"Generating SVG ERD for {database.name}...")
-                svg_content = generate_svg_erd(db_structure)
-
-                if svg_content is None:
-                    logger.error(f"generate_svg_erd returned None for {database.name}!")
-                    raise Exception("SVG generation returned None")
-
-                logger.info(f"Generated SVG ERD: {len(svg_content)} bytes")
-
-                # Upload SVG file (into subfolder)
-                erd_file_path = f'{github_path}/erd.svg'
-
-                if progress_label:
-                    progress_label.text = 'Uploading ERD diagram...'
-                    await asyncio.sleep(0.1)
-
-                # Upload SVG in executor
-                await loop.run_in_executor(
-                    None,
-                    github_mgr.update_file,
-                    repo,
-                    erd_file_path,
-                    svg_content,
-                    f'Update {database.name} ERD diagram'
-                )
-                logger.info(f"Uploaded SVG ERD: {erd_file_path}")
-
+                import logging
+                logger = logging.getLogger(__name__)
+                
+                # Use team-specific path
+                cli_service = get_ninox_cli_service()
+                team_path = cli_service.project_path / f'team_{database.team.team_id}'
+                commits = get_git_log(team_path, database.database_id, limit=50)
+                
+                if not commits:
+                    timeline_container.clear()
+                    with timeline_container:
+                        ui.icon('history', size='4rem', color='grey')
+                        ui.label('No Git history').classes('text-h6 text-grey-7')
+                        ui.label('Run YAML sync to build history.').classes('text-grey-6')
+                    return
+                
+                timeline_container.clear()
+                
+                with timeline_container:
+                    with ui.column().classes('w-full p-4 gap-4'):
+                        with ui.card().classes('w-full p-4 bg-purple-50'):
+                            ui.label(f'{len(commits)} Commits').classes('text-h5 font-bold text-purple')
+                        
+                        ui.separator()
+                        ui.label('Change History').classes('text-h6 font-bold')
+                        
+                        for i, commit in enumerate(commits):
+                            with ui.card().classes('w-full p-3 mb-2'):
+                                ui.label(commit['message']).classes('font-bold')
+                                ui.label(f"{commit['author']} • {commit['sha'][:8]}").classes('text-xs text-grey-7')
+                                if commit['date']:
+                                    ui.label(commit['date'].strftime('%d.%m.%Y %H:%M')).classes('text-xs text-grey-7')
+                
+                ui.notify(f'{len(commits)} commits loaded', type='positive')
+                
             except Exception as e:
-                logger.error(f"Failed to generate/upload ERD for {database.name}: {e}")
-                import traceback
-                logger.error(f"Full traceback:\n{traceback.format_exc()}")
-                # Don't fail the whole sync if ERD generation fails
+                logger = logging.getLogger(__name__)
+                logger.error(f"Timeline error: {e}")
+                timeline_container.clear()
+                with timeline_container:
+                    ui.label('Error loading timeline').classes('text-negative')
+                ui.notify(f'Error: {e}', type='negative')
+        
+        ui.timer(0.1, load_timeline, once=True)
 
-            # Step 6f: Save structure.json locally and extract Ninox code files
-            code_files_count = 0
-            if progress_label:
-                progress_label.text = 'Saving structure and extracting code...'
-                await asyncio.sleep(0.1)
 
+def show_yaml_documentation_dialog(database: Database):
+    """Generate and show documentation from YAML database"""
+    from ..utils.ninox_yaml_parser import NinoxYAMLParser
+    from ..services.ninox_cli_service import get_ninox_cli_service
+    from ..services.doc_generator import DocumentationGenerator
+    from ..database import get_db
+    from ..models.ai_config import AIConfig
+    from ..utils.encryption import get_encryption_manager
+    
+    with ui.dialog() as dialog, ui.card().classes('w-full').style('max-width: 1200px; max-height: 90vh;'):
+        with ui.row().classes('w-full items-center justify-between mb-4 p-4'):
+            ui.label(f'Dokumentation: {database.name}').classes('text-h5 font-bold')
+            ui.button(icon='close', on_click=dialog.close).props('flat round dense')
+        
+        doc_container = ui.column().classes('w-full p-4').style('max-height: 80vh; overflow-y: auto;')
+        
+        with doc_container:
+            status_label = ui.label('Lade YAML-Datenbank...').classes('text-h6')
+            progress = ui.spinner('dots', size='lg')
+        
+        dialog.open()
+        
+        async def generate_docs():
             try:
-                import os
-                server_name = sanitize_name(server.name)
-                team_name_safe = sanitize_name(team.name)
+                import logging
+                logger = logging.getLogger(__name__)
                 
-                # Base path for local storage
-                local_base_path = f'/app/data/code/{server_name}/{team_name_safe}/{db_name}'
-                os.makedirs(local_base_path, exist_ok=True)
+                # Load YAML database from team-specific path
+                cli_service = get_ninox_cli_service()
+                team_path = cli_service.project_path / f'team_{database.team.team_id}'
+                parser = NinoxYAMLParser(str(team_path))
                 
-                # Save structure.json locally for code viewer
-                structure_local_path = f'{local_base_path}/structure.json'
-                with open(structure_local_path, 'w', encoding='utf-8') as f:
-                    json.dump(db_structure, f, indent=2, ensure_ascii=False)
-                logger.info(f"Saved structure.json to {structure_local_path}")
+                status_label.text = 'Suche Datenbank in YAML-Dateien...'
+                databases = parser.get_all_databases()
                 
-                # Save complete-backup.json locally (includes views, reports, etc.)
-                backup_local_path = f'{local_base_path}/complete-backup.json'
-                with open(backup_local_path, 'w', encoding='utf-8') as f:
-                    json.dump(complete_backup, f, indent=2, ensure_ascii=False)
-                logger.info(f"Saved complete-backup.json to {backup_local_path}")
+                yaml_db = None
+                for db in databases:
+                    if db.database_id == database.database_id:
+                        yaml_db = db
+                        break
                 
-                # Save complete-backup.md locally (Markdown documentation)
-                # Note: external_db_structures should still be available from the upload step
+                if not yaml_db:
+                    raise Exception(f"Datenbank {database.database_id} nicht in YAML gefunden. Bitte zuerst YAML-Sync durchführen.")
+                
+                # Build simplified structure directly from YAML (NO JSON!)
+                status_label.text = 'Erstelle Struktur-Übersicht aus YAML...'
+                
+                def build_yaml_summary(yaml_db):
+                    """Build simplified structure summary from YAML database (optimized for AI)"""
+                    summary = {
+                        'name': yaml_db.name,
+                        'database_id': yaml_db.database_id,
+                        'table_count': yaml_db.table_count,
+                        'code_count': yaml_db.code_count,
+                        'tables': []
+                    }
+                    
+                    # Build table ID mapping first (for resolving references)
+                    table_id_to_name = {}
+                    for table_name, table_data in yaml_db.tables.items():
+                        table_id = table_data.get('typeId', table_name)
+                        table_caption = table_data.get('caption', table_name)
+                        table_id_to_name[table_id] = table_caption
+                    
+                    # Add ALL table summaries with ALL fields for comprehensive documentation
+                    for table_name, table_data in yaml_db.tables.items():
+                        table_summary = {
+                            'id': table_data.get('typeId', table_name),  # Include table ID for reference resolution
+                            'name': table_data.get('caption', table_name),
+                            'field_count': len(table_data.get('fields', {})),
+                            'fields': []
+                        }
+                        
+                        # Include ALL fields for comprehensive documentation
+                        all_fields = list(table_data.get('fields', {}).items())
+                        
+                        # Add ALL field summaries
+                        for field_id, field_data in all_fields:
+                            field_type = field_data.get('base', 'unknown')
+                            field_name = field_data.get('caption', field_id)
+                            
+                            # Field structure with name, type, and description hint
+                            field_summary = {
+                                'n': field_name, 
+                                't': field_type
+                            }
+                            
+                            # Add ref target for relationship mapping - resolve to table name
+                            if field_type == 'ref':
+                                ref_id = field_data.get('refTypeId', '')
+                                if ref_id:
+                                    # Resolve reference ID to table name
+                                    ref_name = table_id_to_name.get(ref_id, ref_id)
+                                    field_summary['r'] = ref_name
+                            
+                            # Add formula hint if present (for understanding calculated fields)
+                            if field_type == 'formula' and field_data.get('formula'):
+                                # Just indicate it's a formula, don't include the code
+                                field_summary['f'] = True
+                            
+                            table_summary['fields'].append(field_summary)
+                        
+                        summary['tables'].append(table_summary)
+                    
+                    return summary
+                
+                yaml_summary = build_yaml_summary(yaml_db)
+                
+                # Get AI config
+                status_label.text = 'Prüfe AI-Konfiguration...'
+                db_session = get_db()
                 try:
-                    md_local_content = generate_markdown_from_backup(complete_backup, database.name, external_db_structures)
-                    if md_local_content:
-                        md_local_path = f'{local_base_path}/complete-backup.md'
-                        with open(md_local_path, 'w', encoding='utf-8') as f:
-                            f.write(md_local_content)
-                        logger.info(f"Saved complete-backup.md to {md_local_path}")
-                except Exception as md_err:
-                    logger.error(f"Failed to save local Markdown: {md_err}")
-                
-                # Save reports.json separately for easier access
-                if reports_data:
-                    reports_local_path = f'{local_base_path}/reports.json'
-                    with open(reports_local_path, 'w', encoding='utf-8') as f:
-                        json.dump(reports_data, f, indent=2, ensure_ascii=False)
-                    logger.info(f"Saved reports.json to {reports_local_path}")
-                
-                # Save views.json separately for easier access
-                if views_data:
-                    views_local_path = f'{local_base_path}/views.json'
-                    with open(views_local_path, 'w', encoding='utf-8') as f:
-                        json.dump(views_data, f, indent=2, ensure_ascii=False)
-                    logger.info(f"Saved views.json to {views_local_path}")
-                
-                logger.info(f"Extracting Ninox code for {database.name}...")
-                
-                # Extract code from structure
-                code_files = extract_ninox_code(db_structure, database.name)
-                
-                if code_files:
-                    code_files_count = len(code_files)
-                    logger.info(f"Found {code_files_count} code files to save locally")
+                    ai_config = db_session.query(AIConfig).filter(
+                        AIConfig.provider == 'gemini',
+                        AIConfig.is_active == True
+                    ).first()
                     
-                    if progress_label:
-                        progress_label.text = f'Saving {code_files_count} code files...'
-                        await asyncio.sleep(0.1)
+                    if not ai_config or not ai_config.api_key_encrypted:
+                        raise Exception("Keine aktive Gemini-Konfiguration gefunden. Bitte im Admin-Panel konfigurieren.")
                     
-                    # Save each code file locally
-                    for file_path, file_content in code_files.items():
-                        full_local_path = f'{local_base_path}/{file_path}'
+                    # Decrypt API key
+                    encryption = get_encryption_manager()
+                    api_key = encryption.decrypt(ai_config.api_key_encrypted)
+                    
+                    if not api_key:
+                        raise Exception("API-Key konnte nicht entschlüsselt werden.")
+                    
+                finally:
+                    db_session.close()
+                
+                # Generate documentation (in executor to avoid timeout)
+                status_label.text = 'Generiere Dokumentation mit Gemini AI (kann 30-60s dauern)...'
+                
+                # Create progress indicator
+                progress.set_visibility(True)
+                
+                # Run in executor to avoid blocking
+                import asyncio
+                loop = asyncio.get_event_loop()
+                
+                def generate_in_thread():
+                    # Use YAML summary instead of JSON structure!
+                    doc_gen = DocumentationGenerator(
+                        api_key=api_key,
+                        model=ai_config.model,
+                        max_tokens=ai_config.max_tokens,
+                        temperature=ai_config.temperature
+                    )
+                    return doc_gen.generate(yaml_summary, yaml_db.name)
+                
+                result = await loop.run_in_executor(None, generate_in_thread)
+                
+                if not result.success:
+                    raise Exception(result.error or "Dokumentationsgenerierung fehlgeschlagen")
+                
+                # Display documentation
+                doc_container.clear()
+                
+                with doc_container:
+                    # Header with stats
+                    with ui.row().classes('w-full justify-between items-center mb-4 p-4 bg-purple-50 rounded'):
+                        with ui.column().classes('gap-1'):
+                            ui.label('Dokumentation erfolgreich generiert').classes('font-bold text-purple')
+                            if result.input_tokens and result.output_tokens:
+                                ui.label(f'Tokens: {result.input_tokens} Input, {result.output_tokens} Output').classes('text-xs text-grey-7')
                         
-                        # Create directory if needed
-                        os.makedirs(os.path.dirname(full_local_path), exist_ok=True)
-                        
-                        # Write file
-                        with open(full_local_path, 'w', encoding='utf-8') as f:
-                            f.write(file_content)
+                        ui.button(
+                            'Als Markdown speichern',
+                            icon='download',
+                            on_click=lambda: download_markdown(result.content, yaml_db.name)
+                        ).props('flat color=purple')
                     
-                    logger.info(f"Saved {code_files_count} code files to {local_base_path}")
-                else:
-                    logger.info(f"No code found in {database.name}")
-
+                    # Render markdown
+                    ui.markdown(result.content).classes('w-full')
+                
+                def download_markdown(content, db_name):
+                    import base64
+                    b64 = base64.b64encode(content.encode()).decode()
+                    filename = f"{db_name.replace(' ', '_')}_dokumentation.md"
+                    ui.run_javascript(f'''
+                        const link = document.createElement('a');
+                        link.href = 'data:text/markdown;base64,{b64}';
+                        link.download = '{filename}';
+                        link.click();
+                    ''')
+                
+                logger.info(f"Documentation generated: {len(result.content)} chars")
+                ui.notify('Dokumentation generiert', type='positive')
+                
             except Exception as e:
-                logger.error(f"Failed to extract/save code for {database.name}: {e}")
                 import traceback
-                logger.error(f"Full traceback:\n{traceback.format_exc()}")
-                # Don't fail the whole sync if code extraction fails
+                logger = logging.getLogger(__name__)
+                logger.error(f"Documentation error: {e}\n{traceback.format_exc()}")
+                
+                doc_container.clear()
+                with doc_container:
+                    ui.icon('error', size='64px', color='negative')
+                    ui.label('Fehler bei der Dokumentationsgenerierung').classes('text-h6 text-negative')
+                    ui.label(str(e)).classes('text-grey-7')
+                    
+                    if 'Gemini' in str(e) or 'AI' in str(e):
+                        ui.label('Tipp: Prüfen Sie die Gemini-Konfiguration im Admin-Panel.').classes('text-sm text-grey-6 mt-2')
+                
+                ui.notify(f'Fehler: {e}', type='negative')
+        
+        ui.timer(0.1, generate_docs, once=True)
+    dialog.open()
 
-            # Step 7: Update database record
-            if progress_label:
-                progress_label.text = 'Updating database record...'
-                await asyncio.sleep(0.1)
 
+def include_with_dependencies(user, server, team, database, container):
+    """Show dialog to include database with all its dependencies"""
+    import logging
+    from ..models.database_dependency import DatabaseDependency
+
+    logger = logging.getLogger(__name__)
+
+    # Create dialog
+    with ui.dialog() as dialog, ui.card().classes('w-full max-w-2xl'):
+        with ui.column().classes('w-full gap-4 p-4'):
+            # Header
+            with ui.row().classes('w-full items-center gap-3 mb-2'):
+                ui.icon('link', size='md', color='primary')
+                ui.label(f'Include "{database.name}" mit Abhängigkeiten').classes('text-h6 font-bold')
+
+            ui.separator()
+
+            # Status
+            status_label = ui.label('Lade Abhängigkeiten...').classes('text-sm text-grey-7')
+            progress = ui.spinner('dots', size='md')
+
+            # Results container
+            results_container = ui.column().classes('w-full gap-2 mt-4')
+
+    dialog.open()
+
+    async def scan_and_show():
+        """Load dependencies from database (fast!)"""
+        try:
+            # Get dependencies from database (no YAML scanning needed!)
             db = get_db()
-            db_obj = db.query(Database).filter(Database.id == database.id).first()
-            db_obj.github_path = github_path
-            db_obj.last_modified = datetime.utcnow()
+            try:
+                deps = db.query(DatabaseDependency).filter(
+                    DatabaseDependency.source_database_id == database.id
+                ).all()
+
+                dependency_ids = {d.target_ninox_id for d in deps}
+                logger.info(f"Loaded {len(dependency_ids)} dependencies from DB for {database.name}")
+            finally:
+                db.close()
+
+            dependencies = dependency_ids
+
+            # Get database objects
+            db = get_db()
+            try:
+                dep_databases = []
+                for dep_id in dependencies:
+                    dep_db = db.query(Database).filter(
+                        Database.team_id == team.id,
+                        Database.database_id == dep_id
+                    ).first()
+                    if dep_db:
+                        dep_databases.append(dep_db)
+
+                # Update UI
+                progress.visible = False
+
+                if dependencies:
+                    status_label.text = f'{len(dependencies)} Abhängigkeiten gefunden:'
+
+                    with results_container:
+                        ui.label('Diese Datenbanken werden auch aktiviert:').classes('text-sm font-medium mb-2')
+
+                        for dep_db in dep_databases:
+                            with ui.row().classes('items-center gap-2'):
+                                status_icon = '🔒' if dep_db.is_excluded else '✅'
+                                ui.label(f'{status_icon} {dep_db.name}').classes('text-sm')
+                                if dep_db.is_excluded:
+                                    ui.badge('wird aktiviert', color='positive')
+                                else:
+                                    ui.badge('bereits aktiv', color='grey')
+
+                        ui.separator().classes('my-4')
+
+                        # Buttons
+                        with ui.row().classes('w-full justify-end gap-2'):
+                            ui.button('Abbrechen', on_click=dialog.close).props('flat')
+                            ui.button(
+                                f'Alle aktivieren ({len(dependencies) + 1} DBs)',
+                                icon='check_circle',
+                                on_click=lambda: do_include_all(database, dep_databases, dialog)
+                            ).props('color=positive')
+                else:
+                    status_label.text = 'Keine Abhängigkeiten gefunden'
+                    with results_container:
+                        ui.label('Diese Datenbank hat keine Verknüpfungen zu anderen DBs.').classes('text-sm text-grey-7')
+
+                        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+                            ui.button('Abbrechen', on_click=dialog.close).props('flat')
+                            ui.button(
+                                'Nur diese aktivieren',
+                                icon='check',
+                                on_click=lambda: do_include_all(database, [], dialog)
+                            ).props('color=primary')
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"Error scanning dependencies: {e}")
+            progress.visible = False
+            status_label.text = f'Fehler beim Scannen: {str(e)}'
+            status_label.classes('text-negative')
+
+    def do_include_all(main_db, dep_dbs, dlg):
+        """Include main database and all dependencies"""
+        db = get_db()
+        try:
+            # Include main database
+            db_obj = db.query(Database).filter(Database.id == main_db.id).first()
+            db_obj.is_excluded = False
+
+            # Include all dependencies
+            for dep_db in dep_dbs:
+                if dep_db.is_excluded:
+                    dep_db_obj = db.query(Database).filter(Database.id == dep_db.id).first()
+                    dep_db_obj.is_excluded = False
+
             db.commit()
 
-            # Create detailed audit log
-            sync_details = f'Synced database "{database.name}" to GitHub at {full_path}'
-            if views_data:
-                sync_details += f' | {len(views_data)} views'
-            if reports_data:
-                sync_details += f' | {len(reports_data)} reports'
-            if report_files_data:
-                sync_details += f' | {sum(len(f) for f in report_files_data.values())} report files'
-            if code_files_count > 0:
-                sync_details += f' | {code_files_count} code files'
+            # Audit log
+            details = f'Included database: {main_db.name}'
+            if dep_dbs:
+                dep_names = [d.name for d in dep_dbs if d.is_excluded]
+                if dep_names:
+                    details += f' (with {len(dep_names)} dependencies: {", ".join(dep_names)})'
 
             create_audit_log(
                 db=db,
                 user_id=user.id,
-                action='database_synced',
+                action='database_included',
                 resource_type='database',
-                resource_id=database.id,
-                details=sync_details,
+                resource_id=main_db.id,
+                details=details,
                 auto_commit=True
             )
 
+            ui.notify(f'✅ {len(dep_dbs) + 1} Datenbanken aktiviert!', type='positive')
+
+        finally:
             db.close()
 
-            logger.info(f"✓ Sync completed successfully for {database.name}")
-            
-            # Step 8: Generate AI Changelog (non-blocking)
-            if progress_label:
-                progress_label.text = 'Generating AI changelog...'
-                await asyncio.sleep(0.1)
-            
-            try:
-                await generate_ai_changelog(
-                    user=user,
-                    server=server,
-                    team=team,
-                    database=database,
-                    github_mgr=github_mgr,
-                    repo=repo,
-                    github_path=github_path,
-                    logger=logger
-                )
-            except Exception as e:
-                # Don't fail sync if AI changelog fails
-                logger.warning(f"AI Changelog generation failed (non-critical): {e}")
-            # Don't show toast here - it will be shown by the caller or the UI will be updated
-        else:
-            # Just save structure locally
-            logger.info("GitHub not configured, saving locally...")
+        dlg.close()
+        load_databases(user, server, team, container)
+
+    # Start async scan
+    ui.timer(0.1, scan_and_show, once=True)
+
+
+def exclude_with_dependents(user, server, team, database, container):
+    """Show dialog to exclude database with all databases that depend on it"""
+    import logging
+    from ..models.database_dependency import DatabaseDependency
+
+    logger = logging.getLogger(__name__)
+
+    # Create dialog
+    with ui.dialog() as dialog, ui.card().classes('w-full max-w-2xl'):
+        with ui.column().classes('w-full gap-4 p-4'):
+            # Header
+            with ui.row().classes('w-full items-center gap-3 mb-2'):
+                ui.icon('block', size='md', color='warning')
+                ui.label(f'Exclude "{database.name}" mit abhängigen DBs').classes('text-h6 font-bold')
+
+            ui.separator()
+
+            # Status
+            status_label = ui.label('Lade abhängige Datenbanken...').classes('text-sm text-grey-7')
+            progress = ui.spinner('dots', size='md')
+
+            # Results container
+            results_container = ui.column().classes('w-full gap-2 mt-4')
+
+    dialog.open()
+
+    async def scan_and_show():
+        """Load dependents from database (fast!)"""
+        try:
+            # Get dependents from database (reverse lookup - what depends on THIS database)
             db = get_db()
-            db_obj = db.query(Database).filter(Database.id == database.id).first()
-            db_obj.last_modified = datetime.utcnow()
+            try:
+                deps = db.query(DatabaseDependency).filter(
+                    DatabaseDependency.target_database_id == database.id
+                ).all()
+
+                dependent_ids = {d.source_ninox_id for d in deps}
+                logger.info(f"Loaded {len(dependent_ids)} dependents from DB for {database.name}")
+
+                # Recursively find dependents of dependents
+                all_dependent_ids = dependent_ids.copy()
+                to_process = list(dependent_ids)
+
+                while to_process:
+                    current_id = to_process.pop()
+                    current_db = db.query(Database).filter(
+                        Database.team_id == team.id,
+                        Database.database_id == current_id
+                    ).first()
+
+                    if current_db:
+                        # Find what depends on current_db
+                        sub_deps = db.query(DatabaseDependency).filter(
+                            DatabaseDependency.target_database_id == current_db.id
+                        ).all()
+
+                        for sub_dep in sub_deps:
+                            if sub_dep.source_ninox_id not in all_dependent_ids:
+                                all_dependent_ids.add(sub_dep.source_ninox_id)
+                                to_process.append(sub_dep.source_ninox_id)
+
+            finally:
+                db.close()
+
+            dependents = all_dependent_ids
+
+            # Get database objects
+            db = get_db()
+            try:
+                dep_databases = []
+                for dep_id in dependents:
+                    dep_db = db.query(Database).filter(
+                        Database.team_id == team.id,
+                        Database.database_id == dep_id
+                    ).first()
+                    if dep_db:
+                        dep_databases.append(dep_db)
+
+                # Update UI
+                progress.visible = False
+
+                if dependents:
+                    status_label.text = f'{len(dependents)} abhängige Datenbanken gefunden:'
+
+                    with results_container:
+                        ui.label('Diese Datenbanken hängen von dieser DB ab und werden auch deaktiviert:').classes('text-sm font-medium mb-2 text-warning')
+
+                        for dep_db in dep_databases:
+                            with ui.row().classes('items-center gap-2'):
+                                status_icon = '✅' if not dep_db.is_excluded else '🔒'
+                                ui.label(f'{status_icon} {dep_db.name}').classes('text-sm')
+                                if not dep_db.is_excluded:
+                                    ui.badge('wird deaktiviert', color='warning')
+                                else:
+                                    ui.badge('bereits inaktiv', color='grey')
+
+                        ui.separator().classes('my-4')
+
+                        # Buttons
+                        with ui.row().classes('w-full justify-end gap-2'):
+                            ui.button('Abbrechen', on_click=dialog.close).props('flat')
+                            ui.button(
+                                f'Alle deaktivieren ({len(dependents) + 1} DBs)',
+                                icon='block',
+                                on_click=lambda: do_exclude_all(database, dep_databases, dialog)
+                            ).props('color=warning')
+                else:
+                    status_label.text = 'Keine abhängigen Datenbanken gefunden'
+                    with results_container:
+                        ui.label('Keine anderen DBs hängen von dieser ab.').classes('text-sm text-grey-7')
+
+                        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+                            ui.button('Abbrechen', on_click=dialog.close).props('flat')
+                            ui.button(
+                                'Nur diese deaktivieren',
+                                icon='block',
+                                on_click=lambda: do_exclude_all(database, [], dialog)
+                            ).props('color=warning')
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"Error scanning dependents: {e}")
+            progress.visible = False
+            status_label.text = f'Fehler beim Scannen: {str(e)}'
+            status_label.classes('text-negative')
+
+    def do_exclude_all(main_db, dep_dbs, dlg):
+        """Exclude main database and all dependents"""
+        db = get_db()
+        try:
+            # Exclude main database
+            db_obj = db.query(Database).filter(Database.id == main_db.id).first()
+            db_obj.is_excluded = True
+
+            # Exclude all dependents
+            for dep_db in dep_dbs:
+                if not dep_db.is_excluded:
+                    dep_db_obj = db.query(Database).filter(Database.id == dep_db.id).first()
+                    dep_db_obj.is_excluded = True
+
             db.commit()
 
-            # Create audit log
+            # Audit log
+            details = f'Excluded database: {main_db.name}'
+            if dep_dbs:
+                dep_names = [d.name for d in dep_dbs if not d.is_excluded]
+                if dep_names:
+                    details += f' (with {len(dep_names)} dependents: {", ".join(dep_names)})'
+
             create_audit_log(
                 db=db,
                 user_id=user.id,
-                action='database_synced',
+                action='database_excluded',
                 resource_type='database',
-                resource_id=database.id,
-                details=f'Synced database "{database.name}" (GitHub not configured)'
+                resource_id=main_db.id,
+                details=details,
+                auto_commit=True
             )
 
+            ui.notify(f'🚫 {len(dep_dbs) + 1} Datenbanken deaktiviert!', type='warning')
+
+        finally:
             db.close()
 
-            logger.warning(
-                f'Database "{database.name}" synced, but GitHub is not configured. '
-                'Configure GitHub in Profile settings to push to repository.'
-            )
-
-        # Reload databases if container is provided
-        if container:
-            load_databases(user, server, team, container)
-
-    except Exception as e:
-        logger.error(f"=== SYNC ERROR === Database: {database.name}")
-        logger.error(f"Error type: {type(e).__name__}")
-        logger.error(f"Error message: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise  # Re-raise to be caught by caller
-
-
-def sync_all_databases(user, server, team, databases, container=None):
-    """
-    Sync all non-excluded databases using background sync manager.
-    Syncs continue even if user leaves the page.
-    Blocks individual syncs while bulk sync is active.
-    """
-    import logging
-    from ..services.background_sync import get_sync_manager
-    
-    logger = logging.getLogger(__name__)
-
-    # Get sync manager
-    sync_manager = get_sync_manager()
-    
-    # Check if bulk sync is already running for this team
-    if sync_manager.is_bulk_sync_active(team.id):
-        Toast.warning('Bulk sync already in progress for this team')
-        return
-
-    # Filter non-excluded databases
-    databases_to_sync = [db for db in databases if not db.is_excluded]
-    total_count = len(databases_to_sync)
-
-    if total_count == 0:
-        Toast.warning('No databases to sync (all are excluded)')
-        return
-
-    # Start bulk sync mode
-    sync_manager.start_bulk_sync(team.id, total_count)
-    
-    # Start background syncs for all databases
-    started_count = 0
-    skipped_count = 0
-    
-    for database in databases_to_sync:
-        if sync_manager.is_syncing(database.id):
-            skipped_count += 1
-            logger.info(f"Skipping {database.name} - already syncing")
-        else:
-            started = sync_manager.start_sync(user, server, team, database)
-            if started:
-                started_count += 1
-                logger.info(f"Started background sync for {database.name}")
-            else:
-                skipped_count += 1
-    
-    # Show result
-    if started_count > 0:
-        Toast.info(f'Started bulk sync for {started_count} databases - runs in background')
-    
-    if skipped_count > 0:
-        Toast.warning(f'{skipped_count} databases already syncing')
-    
-    # If no syncs started, end bulk sync mode
-    if started_count == 0:
-        sync_manager.end_bulk_sync()
-    
-    # Reload to show spinners
-    if container:
+        dlg.close()
         load_databases(user, server, team, container)
+
+    # Start async scan
+    ui.timer(0.1, scan_and_show, once=True)
 
 
 def toggle_database_exclusion(user, database, is_excluded, container):
-    """Toggle database exclusion status"""
+    """Toggle database exclusion status and automatically include dependencies"""
+    import logging
+    logger = logging.getLogger(__name__)
+
     try:
         db = get_db()
 
+        # Get team first (needed for dependency resolution)
+        team = db.query(Team).filter(Team.id == database.team_id).first()
+        server = db.query(Server).filter(Server.id == team.server_id).first()
+
+        # TODO: Auto-include/exclude temporarily disabled due to performance issues
+        # Will be replaced with a manual "Include with Dependencies" button
+        auto_included = []
+        auto_excluded = []
+
+        # Simple include/exclude without dependency checking (for now)
+        logger.info(f"{'Excluding' if is_excluded else 'Including'} database {database.name} (no auto-dependency check)")
+
+        # Update the main database
         db_obj = db.query(Database).filter(Database.id == database.id).first()
         db_obj.is_excluded = is_excluded
         db.commit()
 
         # Create audit log
         action = 'database_excluded' if is_excluded else 'database_included'
+        details = f'{"Excluded" if is_excluded else "Included"} database: {database.name}'
+        if auto_included:
+            details += f' (Auto-included {len(auto_included)} dependencies: {", ".join(auto_included)})'
+        if auto_excluded:
+            details += f' (Auto-excluded {len(auto_excluded)} dependents: {", ".join(auto_excluded)})'
+
         create_audit_log(
             db=db,
             user_id=user.id,
             action=action,
             resource_type='database',
             resource_id=database.id,
-            details=f'{"Excluded" if is_excluded else "Included"} database: {database.name}',
+            details=details,
             auto_commit=True
         )
 
-        # Get server and team for reload
-        team = db.query(Team).filter(Team.id == database.team_id).first()
-        server = db.query(Server).filter(Server.id == team.server_id).first()
-
         db.close()
 
+        # Show success message
         status_text = 'excluded' if is_excluded else 'included'
-        Toast.success(f'Database "{database.name}" {status_text} successfully!')
+        message = f'Database "{database.name}" {status_text} successfully!'
+
+        if auto_included:
+            message += f'\n\n✅ Automatisch aktiviert ({len(auto_included)} Abhängigkeiten):\n• ' + '\n• '.join(auto_included)
+
+        if auto_excluded:
+            message += f'\n\n🚫 Automatisch deaktiviert ({len(auto_excluded)} abhängige DBs):\n• ' + '\n• '.join(auto_excluded)
+
+        Toast.success(message)
 
         # Reload databases
         load_databases(user, server, team, container)
 
     except Exception as e:
         Toast.error(f'Error updating database status: {str(e)}')
-
-
-def show_json_viewer_from_sync(user, server, team, database):
-    """Show JSON viewer dialog - wrapper to call json_viewer function"""
-    from .json_viewer import show_json_viewer_dialog
-    show_json_viewer_dialog(user, server, team, database)
 
 
 def show_erd_viewer_dialog(user, server, team, database):
@@ -1881,177 +2628,432 @@ def show_documentation_dialog(user, server, team, database):
     
     dialog.open()
 
-
-def show_upload_drive_dialog(user, server, team, database):
-    """Show dialog for uploading JSON to Google Drive as Google Doc"""
-    import logging
-    from datetime import datetime
-    from ..services.drive_service import (
-        GoogleDriveService, refresh_access_token, get_drive_config, DriveUploadResult
-    )
-    from ..utils.encryption import get_encryption_manager
-    from ..api.github_manager import GitHubManager
-    from ..utils.github_utils import sanitize_name, get_repo_name_from_server
-    import json
-    
-    logger = logging.getLogger(__name__)
-    
-    with ui.dialog() as dialog, ui.card().classes('w-full max-w-2xl'):
-        # Header
-        with ui.row().classes('w-full items-center justify-between p-4').style(
-            'background: linear-gradient(135deg, #009688 0%, #00796b 100%); margin: -16px -16px 0 -16px; width: calc(100% + 32px);'
-        ):
-            with ui.row().classes('items-center gap-2'):
-                ui.icon('cloud_upload', color='white', size='md')
-                ui.label(f'Upload Drive: {database.name}').classes('text-h6 text-white font-bold')
-            ui.button(icon='close', on_click=dialog.close).props('flat color=white')
-        
-        with ui.column().classes('w-full p-4 gap-4'):
-            # Check if user has refresh token
-            enc_manager = get_encryption_manager()
-            has_refresh_token = bool(user.google_refresh_token_encrypted)
-            
-            if not has_refresh_token:
-                with ui.card().classes('w-full p-4 bg-amber-50'):
-                    ui.label('Erneute Anmeldung erforderlich').classes('font-bold text-amber-800')
-                    ui.label(
-                        'Um Google Drive zu nutzen, müssen Sie sich einmal ab- und wieder anmelden. '
-                        'Dabei werden die erweiterten Berechtigungen für Google Drive angefordert.'
-                    ).classes('text-sm text-amber-700')
-                    ui.button(
-                        'Abmelden und neu anmelden',
-                        icon='logout',
-                        on_click=lambda: ui.navigate.to('/logout')
-                    ).props('color=amber')
-                return
-            
-            # Get Drive config
-            drive_config = get_drive_config()
-            if not drive_config or not drive_config.get('enabled'):
-                ui.label('Google Drive ist nicht aktiviert.').classes('text-negative')
-                return
-            
-            shared_folder = drive_config.get('shared_folder_name', 'ninox2git')
-            
-            # Info
-            ui.label('Die komplett.json Datei wird als Google Doc hochgeladen:').classes('text-subtitle1')
-            
-            with ui.card().classes('w-full p-3 bg-grey-1'):
-                path_display = f"{shared_folder}/{sanitize_name(server.name)}/{sanitize_name(team.name)}/{sanitize_name(database.name)}/komplett.json"
-                ui.label(path_display).classes('font-mono text-sm')
-            
-            # Show last upload if exists
-            if database.drive_document_id:
-                with ui.row().classes('items-center gap-2'):
-                    ui.icon('check_circle', color='positive')
-                    ui.label('Bereits hochgeladen').classes('text-positive')
-                    if database.drive_last_upload:
-                        ui.label(f'({database.drive_last_upload.strftime("%d.%m.%Y %H:%M")})').classes('text-grey-6 text-sm')
-                    ui.button(
-                        'Öffnen',
-                        icon='open_in_new',
-                        on_click=lambda: ui.navigate.to(
-                            f'https://docs.google.com/document/d/{database.drive_document_id}/edit',
-                            new_tab=True
-                        )
-                    ).props('flat dense')
-            
-            # Status area
-            status_container = ui.column().classes('w-full')
-            
-            # Upload button
-            async def do_upload():
-                with status_container:
-                    status_container.clear()
-                    
-                    with ui.row().classes('items-center gap-2'):
-                        ui.spinner(size='sm')
-                        status_label = ui.label('Lade JSON von GitHub...')
-                
-                try:
-                    # 1. Get JSON from GitHub
-                    github_token = enc_manager.decrypt(user.github_token_encrypted)
-                    github = GitHubManager(github_token, user.github_organization)
-                    repo_name = get_repo_name_from_server(server)
-                    repo = github.ensure_repository(repo_name)
-                    
-                    json_path = f"{database.github_path}/{sanitize_name(database.name)}-komplett.json"
-                    json_content = github.get_file_content(repo, json_path)
-                    
-                    if not json_content:
-                        raise ValueError(f"JSON-Datei nicht gefunden: {json_path}")
-                    
-                    json_data = json.loads(json_content)
-                    
-                    status_label.text = 'Erneuere Google Token...'
-                    
-                    # 2. Refresh access token
-                    refresh_token = enc_manager.decrypt(user.google_refresh_token_encrypted)
-                    access_token = await refresh_access_token(
-                        drive_config['client_id'],
-                        drive_config['client_secret'],
-                        refresh_token
-                    )
-                    
-                    if not access_token:
-                        raise ValueError("Konnte Google Token nicht erneuern. Bitte erneut anmelden.")
-                    
-                    status_label.text = 'Lade zu Google Drive hoch...'
-                    
-                    # 3. Upload to Drive
-                    drive_service = GoogleDriveService(access_token)
-                    result = await drive_service.upload_json_as_doc(
-                        shared_drive_name=shared_folder,
-                        server_name=server.name,
-                        team_name=team.name,
-                        database_name=database.name,
-                        json_content=json_data,
-                        existing_doc_id=database.drive_document_id
-                    )
-                    
-                    if not result.success:
-                        raise ValueError(result.error)
-                    
-                    # 4. Update database record
-                    db = get_db()
-                    try:
-                        db_record = db.query(Database).get(database.id)
-                        db_record.drive_document_id = result.document_id
-                        db_record.drive_last_upload = datetime.now()
-                        db.commit()
-                    finally:
-                        db.close()
-                    
-                    # Show success
-                    status_container.clear()
-                    with status_container:
-                        with ui.row().classes('items-center gap-2'):
-                            ui.icon('check_circle', color='positive', size='md')
-                            ui.label('Erfolgreich hochgeladen!').classes('text-positive font-bold')
-                        
-                        ui.button(
-                            'Dokument öffnen',
-                            icon='open_in_new',
-                            on_click=lambda: ui.navigate.to(result.document_url, new_tab=True)
-                        ).props('color=primary')
-                    
-                    ui.notify('Upload zu Google Drive erfolgreich!', type='positive')
-                    
-                except Exception as e:
-                    logger.error(f"Drive upload error: {e}")
-                    status_container.clear()
-                    with status_container:
-                        with ui.row().classes('items-center gap-2'):
-                            ui.icon('error', color='negative', size='md')
-                            ui.label(f'Fehler: {str(e)}').classes('text-negative')
-                    ui.notify(f'Upload fehlgeschlagen: {str(e)}', type='negative')
-            
-            with ui.row().classes('w-full justify-end gap-2 mt-4'):
-                ui.button('Abbrechen', on_click=dialog.close).props('flat')
-                ui.button(
-                    'Upload Drive' if not database.drive_document_id else 'Aktualisieren',
-                    icon='cloud_upload',
-                    on_click=do_upload
-                ).props('color=teal')
-    
     dialog.open()
+
+
+# ============================================================================
+# YAML Sync Functions (ninox-dev-cli integration)
+# ============================================================================
+
+async def handle_yaml_sync_click(user, server, team, database, container):
+    """Handle YAML sync for a single database (uses database Auto-ERD/Auto-Doku settings)"""
+    import logging
+    from ..services.ninox_sync_service import get_ninox_sync_service
+
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"Starting YAML sync for database: {database.name} ({database.database_id})")
+
+    try:
+        sync_service = get_ninox_sync_service()
+
+        # Show notification
+        auto_erd = getattr(database, 'auto_generate_erd', True)
+        auto_docs = database.auto_generate_docs
+        ui.notify(
+            f'Starte YAML-Sync für {database.name}...\n'
+            f'ERD: {"✓" if auto_erd else "⏭"} | Doku: {"✓" if auto_docs else "⏭"}',
+            type='info'
+        )
+
+        # Perform sync (will use database settings automatically)
+        result = await sync_service.sync_database_async(
+            server,
+            team,
+            database.database_id,
+            user=user
+        )
+
+        if result.success:
+            logger.info(f"YAML sync successful for {database.name} in {result.duration_seconds:.1f}s")
+
+            # Scan and save dependencies in background
+            logger.info(f"Scanning dependencies for {database.name}...")
+            save_database_dependencies(team, database.database_id)
+
+            ui.notify(
+                f'✅ YAML-Sync erfolgreich: {database.name} ({result.duration_seconds:.1f}s)',
+                type='positive'
+            )
+        else:
+            logger.error(f"YAML sync failed for {database.name}: {result.error}")
+            ui.notify(f'YAML-Sync fehlgeschlagen: {result.error}', type='negative')
+
+    except Exception as e:
+        logger.error(f"Error in YAML sync for {database.name}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        ui.notify(f'Fehler beim YAML-Sync: {str(e)}', type='negative')
+
+
+async def sync_all_yaml(user, server, team, databases, container):
+    """Sync YAML for all databases in background (uses per-database Auto-ERD/Auto-Doku settings)"""
+    import logging
+    from ..services.background_sync import get_sync_manager
+
+    logger = logging.getLogger(__name__)
+
+    # Filter out excluded databases
+    active_databases = [d for d in databases if not d.is_excluded]
+
+    if not active_databases:
+        ui.notify('Keine aktiven Datenbanken zum Synchronisieren', type='warning')
+        return
+
+    # Count DBs with auto-docs and auto-erd enabled
+    docs_enabled_dbs = [d for d in active_databases if d.auto_generate_docs]
+    erd_enabled_dbs = [d for d in active_databases if getattr(d, 'auto_generate_erd', True)]
+
+    # Start all databases in background using BackgroundSyncManager
+    sync_manager = get_sync_manager()
+    sync_manager.start_bulk_sync(team.id, len(active_databases))
+
+    # No need to set skip flags - each database uses its own settings
+
+    # Start each sync in background
+    for db in active_databases:
+        sync_manager.start_sync(user, server, team, db)
+
+    # Show notification with info about settings
+    ui.notify(
+        f'🚀 Sync gestartet!\n\n'
+        f'📦 {len(active_databases)} Datenbanken werden synchronisiert\n'
+        f'🎨 ERD: {len(erd_enabled_dbs)} DBs (per Auto-ERD Einstellung)\n'
+        f'📄 Doku: {len(docs_enabled_dbs)} DBs (per Auto-Doku Einstellung)\n\n'
+        f'✅ Sie können die Seite verlassen - der Sync läuft weiter!\n'
+        f'🔄 Seite aktualisiert sich alle 5 Sekunden.\n\n'
+        f'💡 Tipp: Ändern Sie die Auto-ERD/Auto-Doku Einstellungen in den Datenbank-Karten',
+        type='info',
+        timeout=8000
+    )
+
+    logger.info(f"✓ Background sync started: {len(active_databases)} DBs | ERD: {len(erd_enabled_dbs)} DBs | Docs: {len(docs_enabled_dbs)} DBs")
+
+    # Refresh UI immediately to show "Syncing..." status
+    load_databases(user, server, team, container)
+
+
+def toggle_all_auto_docs(user, server: Server, team: Team, database_list_refreshable):
+    """Toggle auto_generate_docs for all databases in team"""
+    db = get_db()
+    try:
+        databases = db.query(Database).filter(Database.team_id == team.id).all()
+
+        if not databases:
+            return
+
+        # Toggle to opposite of current state (use first DB as reference)
+        new_state = not databases[0].auto_generate_docs
+
+        for db_obj in databases:
+            db_obj.auto_generate_docs = new_state
+
+        db.commit()
+
+        ui.notify(
+            f'✓ Auto-Doku {"aktiviert" if new_state else "deaktiviert"} für {len(databases)} Datenbanken',
+            type='positive'
+        )
+
+        # Refresh the database list
+        database_list_refreshable.refresh()
+
+    finally:
+        db.close()
+
+
+def toggle_all_auto_erd(user, server: Server, team: Team, database_list_refreshable):
+    """Toggle auto_generate_erd for all databases in team"""
+    db = get_db()
+    try:
+        databases = db.query(Database).filter(Database.team_id == team.id).all()
+
+        if not databases:
+            return
+
+        # Toggle to opposite of current state
+        new_state = not getattr(databases[0], 'auto_generate_erd', True)
+
+        for db_obj in databases:
+            db_obj.auto_generate_erd = new_state
+
+        db.commit()
+
+        ui.notify(
+            f'✓ Auto-ERD {"aktiviert" if new_state else "deaktiviert"} für {len(databases)} Datenbanken',
+            type='positive'
+        )
+
+        # Refresh the database list
+        database_list_refreshable.refresh()
+
+    finally:
+        db.close()
+
+
+def generate_documentation_for_database(database: Database, user, server: Server, team: Team, container):
+    """Manually trigger documentation generation for a single database (runs in thread)"""
+    import logging
+    import threading
+    from ..services.ninox_sync_service import get_ninox_sync_service
+    from ..utils.path_resolver import get_database_path
+
+    logger = logging.getLogger(__name__)
+
+    # Check if already generating
+    if database.id in _doc_generating:
+        ui.notify(f'Dokumentation für {database.name} wird bereits generiert!', type='warning')
+        return
+
+    logger.info(f"Manual documentation generation triggered for: {database.name}")
+
+    # Add to generating dict with initial progress
+    _doc_generating[database.id] = {'current': 0, 'total': 1}
+
+    # Force immediate refresh on next timer tick
+    _force_refresh['needed'] = True
+
+    # Show notification
+    ui.notify(
+        f'⏳ Dokumentations-Generierung gestartet für {database.name}\n'
+        f'Läuft im Hintergrund (~1-2 Min). Sie können weiterarbeiten!',
+        type='info',
+        timeout=5000
+    )
+
+    # Note: Auto-refresh timer (every 5s) will show progress automatically
+    # No need for immediate reload - user will see progress within 5 seconds
+
+    def progress_callback(current, total):
+        """Update progress in global dict"""
+        _doc_generating[database.id] = {'current': current, 'total': total}
+        logger.info(f"Docs progress for {database.name}: Batch {current}/{total}")
+
+    def generate_in_thread():
+        """Run in separate thread to avoid blocking UI"""
+        try:
+            logger.info(f"Thread: Starting docs generation for {database.name}")
+
+            # Get database path
+            db_path = get_database_path(server, team, database.name)
+
+            if not db_path or not db_path.exists():
+                logger.error(f"Database path not found: {db_path}")
+                _doc_generating.pop(database.id, None)
+                return
+
+            # Generate documentation with progress callback
+            from ..utils.ninox_yaml_parser import NinoxYAMLParser
+            from ..services.doc_generator import get_documentation_generator
+
+            # Parse database
+            parser = NinoxYAMLParser(str(db_path))
+            databases = parser.get_all_databases()
+
+            if not databases:
+                logger.error(f"No databases found in {db_path}")
+                _doc_generating.pop(database.id, None)
+                return
+
+            yaml_db = databases[0]
+
+            # Get generator
+            generator = get_documentation_generator()
+            if not generator:
+                logger.error("No documentation generator available")
+                _doc_generating.pop(database.id, None)
+                return
+
+            # Generate with progress callback
+            structure_dict = yaml_db.to_dict_for_docs()
+            result = generator.generate(structure_dict, yaml_db.name, progress_callback=progress_callback)
+
+            if result.success:
+                # Save to file and database
+                from ..models.documentation import Documentation
+                from ..services.ninox_sync_service import commit_changes
+                from ..utils.github_utils import sanitize_name
+
+                db_conn = get_db()
+                try:
+                    # Save to database
+                    doc = Documentation(
+                        database_id=database.id,
+                        content=result.content,
+                        model=result.model,
+                        input_tokens=result.input_tokens,
+                        output_tokens=result.output_tokens
+                    )
+                    db_conn.add(doc)
+                    db_conn.commit()
+
+                    # Save to file directly at database root for better visibility in GitHub
+                    docs_file = db_path / 'APPLICATION_DOCS.md'
+                    docs_file.parent.mkdir(parents=True, exist_ok=True)
+
+                    with open(docs_file, 'w', encoding='utf-8') as f:
+                        f.write(result.content)
+
+                    # Also generate scripts.md with all code
+                    from ..utils.scripts_md_generator import generate_scripts_md
+
+                    scripts_content = generate_scripts_md(yaml_db)
+                    scripts_file = db_path / 'SCRIPTS.md'
+                    scripts_file.parent.mkdir(parents=True, exist_ok=True)
+
+                    with open(scripts_file, 'w', encoding='utf-8') as f:
+                        f.write(scripts_content)
+
+                    logger.info(f"✓ Scripts saved for {database.name}")
+
+                    # Commit to git (both docs and scripts)
+                    server_path = db_path.parent.parent.parent
+                    commit_changes(server_path, f"Update documentation and scripts for {yaml_db.name}")
+
+                    logger.info(f"✓ Documentation and scripts saved for {database.name}")
+
+                    # Push to GitHub if user has GitHub configured
+                    if user and user.github_token_encrypted:
+                        try:
+                            import subprocess
+                            logger.info("📤 Pushing documentation and scripts to GitHub...")
+                            push_result = subprocess.run(
+                                ['git', 'push'],
+                                cwd=server_path,
+                                capture_output=True,
+                                text=True
+                            )
+                            if push_result.returncode == 0:
+                                logger.info("✅ Documentation and scripts pushed to GitHub successfully")
+                            else:
+                                logger.warning(f"GitHub push failed: {push_result.stderr}")
+                        except Exception as e:
+                            logger.warning(f"GitHub push failed (non-critical): {e}")
+
+                finally:
+                    db_conn.close()
+            else:
+                logger.error(f"Documentation generation failed: {result.error}")
+
+        except Exception as e:
+            logger.error(f"Error generating documentation for {database.name}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            # Remove from generating dict
+            _doc_generating.pop(database.id, None)
+            # Force refresh to hide progress indicators
+            _force_refresh['needed'] = True
+            logger.info(f"✓ Documentation generation finished for {database.name} - force refresh set")
+
+    # Start in separate thread (non-blocking)
+    thread = threading.Thread(target=generate_in_thread, daemon=True)
+    thread.start()
+    logger.info(f"✓ Documentation generation thread started for {database.name}")
+
+
+def sync_to_bookstack(database: Database, user, server: Server, team: Team):
+    """Sync database documentation to BookStack"""
+    import logging
+    from ..services.bookstack_service import get_bookstack_service
+    from ..models.documentation import Documentation
+
+    logger = logging.getLogger(__name__)
+
+    # Check if BookStack is configured for this server
+    db = get_db()
+    try:
+        from ..models.bookstack_config import BookstackConfig
+        bs_config = db.query(BookstackConfig).filter(
+            BookstackConfig.server_id == server.id,
+            BookstackConfig.is_active == True
+        ).first()
+
+        if not bs_config or not bs_config.is_configured:
+            ui.notify(
+                f'BookStack nicht konfiguriert für Server {server.name}\n'
+                f'Bitte konfigurieren Sie BookStack im Admin-Panel.',
+                type='warning',
+                timeout=5000
+            )
+            return
+
+        # Get latest documentation
+        doc = db.query(Documentation).filter(
+            Documentation.database_id == database.id
+        ).order_by(Documentation.generated_at.desc()).first()
+
+        if not doc or not doc.content:
+            ui.notify(
+                f'Keine Dokumentation vorhanden für {database.name}\n'
+                f'Bitte generieren Sie zuerst eine Dokumentation mit "GEN DOKU".',
+                type='warning',
+                timeout=5000
+            )
+            return
+
+        # Try to read SCRIPTS.md from file system
+        scripts_content = None
+        try:
+            from ..utils.path_resolver import get_database_path
+            db_path = get_database_path(server, team, database.name)
+
+            if db_path and db_path.exists():
+                scripts_file = db_path / 'SCRIPTS.md'
+                if scripts_file.exists():
+                    with open(scripts_file, 'r', encoding='utf-8') as f:
+                        scripts_content = f.read()
+                    logger.info(f"Found SCRIPTS.md for {database.name} - will include in BookStack sync")
+                else:
+                    logger.info(f"No SCRIPTS.md found for {database.name} - will only sync documentation")
+        except Exception as e:
+            logger.warning(f"Could not read SCRIPTS.md: {e}")
+
+        # Show notification
+        pages_info = "Dokumentation + Scripts" if scripts_content else "Dokumentation"
+        ui.notify(
+            f'⏳ Übertrage {database.name} zu BookStack...\n'
+            f'Inhalt: {pages_info}\n'
+            f'Shelf: {bs_config.default_shelf_name}',
+            type='info'
+        )
+
+        # Sync to BookStack
+        bookstack_service = get_bookstack_service()
+        success, result = bookstack_service.sync_database_to_bookstack(
+            database,
+            server,
+            doc.content,
+            scripts_content
+        )
+
+        if success:
+            # Get updated database to show sync time
+            db_updated = db.query(Database).filter(Database.id == database.id).first()
+            sync_time = db_updated.last_bookstack_sync.strftime('%d.%m.%Y %H:%M') if db_updated and db_updated.last_bookstack_sync else 'Jetzt'
+
+            pages_count = 2 if scripts_content else 1
+            pages_text = f"({pages_count} Seiten)" if scripts_content else "(1 Seite)"
+
+            ui.notify(
+                f'✓ Erfolgreich zu BookStack übertragen!\n'
+                f'{database.name} → BookStack {pages_text}\n'
+                f'Letzte Übertragung: {sync_time}',
+                type='positive',
+                timeout=5000
+            )
+            logger.info(f"✓ Synced {database.name} to BookStack with {pages_count} page(s): {result}")
+
+            # Trigger refresh to update card (button color, date display)
+            _force_refresh['needed'] = True
+
+        else:
+            ui.notify(
+                f'✗ Fehler beim Übertragen zu BookStack:\n{result}',
+                type='negative',
+                timeout=7000
+            )
+            logger.error(f"BookStack sync failed for {database.name}: {result}")
+
+    finally:
+        db.close()

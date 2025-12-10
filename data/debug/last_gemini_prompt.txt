@@ -1,0 +1,81 @@
+=== PROMPT FOR: None ===
+Model: gemini-3-pro-preview
+Tables: 2
+Size: 1752 chars
+================================================================================
+
+Du bist ein technischer Dokumentations-Assistent. Erstelle eine VOLLSTÄNDIGE technische Dokumentation für eine Ninox-Datenbank.
+
+WICHTIG: Dokumentiere JEDE EINZELNE Tabelle separat! Überspringe keine Tabellen!
+
+Erstelle folgende Struktur:
+
+## 1. Übersicht
+- Name und Zweck der Datenbank
+- Statistik: Anzahl Tabellen, Felder
+
+## 2. Tabellenverzeichnis
+Liste ALLER Tabellen mit Kurzbeschreibung
+
+## 3. Detaillierte Tabellenstruktur
+Für JEDE der bereitgestellten Tabellen (ALLE!) erstelle einen Abschnitt:
+
+### [Tabellenname]
+- Beschreibung basierend auf Feldern
+- Tabelle mit ALLEN Feldern
+- Code-Beispiele wenn vorhanden
+
+## 4. Beziehungen
+Zeige alle ref-Felder als Diagramm
+
+## 5. Zusammenfassung
+- Kernentitäten
+- Komplexität
+
+WICHTIG: 
+- Dokumentiere JEDE Tabelle separat!
+- Nutze das volle Token-Limit!
+- Sprache: Deutsch
+- Format: Markdown
+
+Datenbankstruktur:
+
+# Datenbank: 11-Produktion
+- Database ID: 11-Produktion
+- Anzahl Tabellen: 2
+- Anzahl Code-Elemente: 381
+- Gesamtzahl Felder: 12
+- Anzahl Verknüpfungen: 1
+
+## Tabelle: Lager
+Anzahl Felder: 3
+
+| Feldname | Typ | Referenz/Details | Code |
+|----------|-----|------------------|------|
+| Lagername | string | - | - |
+| Standardlager | boolean | - | permissions |
+| Grunddaten | ref | → T | - |
+
+## Tabelle: ExportNew
+Anzahl Felder: 9
+
+| Feldname | Typ | Referenz/Details | Code |
+|----------|-----|------------------|------|
+| ChargenNr | string | - | - |
+| Block | string | - | - |
+| Rohstoff | string | - | - |
+| HNC Typ | string | - | - |
+| Nitrierleistung | string | - | - |
+| Säuremodul | string | - | - |
+| Schicht | string | - | - |
+| Chargengrösse | string | - | - |
+| Datum | string | - | - |
+
+---
+## Beziehungsübersicht
+
+Anzahl Verknüpfungen: 1
+
+```
+Lager → T (via Grunddaten)
+```

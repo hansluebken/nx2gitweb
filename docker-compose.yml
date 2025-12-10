@@ -53,11 +53,22 @@ services:
       NICEGUI_PORT: 8765
       SESSION_SECRET: ${SECRET_KEY}
 
+      # Ninox CLI
+      NINOX_CLI_DATA_PATH: /app/data/ninox-cli
+
+      # VS Code Server (via oauth2-proxy)
+      VSCODE_SERVER_URL: https://vscode.4hl.dev
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     volumes:
       - ./app:/app/app  # Mount app code for live updates
       - ./data/keys:/app/data/keys
       - ./data/logs:/app/data/logs
       - ./data/code:/app/data/code  # Ninox code files (persistent)
+      - ./data/ninox-cli:/app/data/ninox-cli  # Ninox YAML files (persistent)
+      - ./data/debug:/app/data/debug  # Debug logs for Gemini API calls
     # ============================================
     # PORT CONFIGURATION - Choose ONE option:
     # ============================================

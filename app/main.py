@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from .database import init_db, get_db
 from .auth import create_admin_user, get_user_from_token, InvalidTokenError
-from .ui import login, dashboard, servers, teams, sync, admin, profile, cronjobs, json_viewer, code_viewer, changes
+from .ui import login, dashboard, servers, teams, sync, admin, profile, cronjobs, json_viewer, code_viewer, yaml_code_viewer, changes
 from .services.cronjob_scheduler import get_scheduler
 
 # Configure logging
@@ -85,10 +85,10 @@ def require_admin():
 
 @ui.page('/')
 def index():
-    """Root page - redirect to dashboard or login"""
+    """Root page - redirect to sync or login"""
     user = get_current_user()
     if user:
-        ui.navigate.to('/dashboard')
+        ui.navigate.to('/sync')
     else:
         ui.navigate.to('/login')
     return None
@@ -180,8 +180,8 @@ def teams_page():
 
 
 @ui.page('/sync')
-def sync_page():
-    """Synchronization page"""
+def sync_page(server: int = None, team: int = None):
+    """Synchronization page with optional server and team parameters"""
     token = app.storage.user.get(SESSION_TOKEN_KEY)
     if not token:
         ui.navigate.to('/login')
@@ -197,7 +197,8 @@ def sync_page():
         ui.navigate.to('/login')
         return None
 
-    sync.render(user)
+    # Pass server and team parameters to render function
+    sync.render(user, server_id_param=server, team_id_param=team)
     return None
 
 
@@ -339,6 +340,28 @@ def changes_page():
     return None
 
 
+@ui.page('/yaml-code-viewer')
+def yaml_code_viewer_page():
+    """YAML Code Viewer page for ninox-dev-cli files"""
+    token = app.storage.user.get(SESSION_TOKEN_KEY)
+    if not token:
+        ui.navigate.to('/login')
+        return None
+
+    try:
+        db = get_db()
+        user = get_user_from_token(db, token)
+        db.close()
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
+        app.storage.user.pop(SESSION_TOKEN_KEY, None)
+        ui.navigate.to('/login')
+        return None
+
+    yaml_code_viewer.render(user)
+    return None
+
+
 # ============================================================================
 # OAuth Routes
 # ============================================================================
@@ -347,7 +370,7 @@ def changes_page():
 def google_auth_start():
     """Start Google OAuth flow - redirects to Google"""
     from .services.oauth_service import get_oauth_service
-    from .services.drive_service import is_drive_enabled
+    # Google Drive removed - no longer used
     from starlette.responses import RedirectResponse
     
     oauth_service = get_oauth_service()
@@ -355,10 +378,10 @@ def google_auth_start():
         ui.notify('Google OAuth ist nicht konfiguriert', type='negative')
         ui.navigate.to('/login')
         return None
-    
-    # Check if Drive is enabled - if so, include Drive scopes
-    include_drive = is_drive_enabled()
-    
+
+    # Google Drive removed - no longer request Drive scopes
+    include_drive = False
+
     # Generate auth URL and redirect
     auth_url, state = oauth_service.generate_auth_url(include_drive=include_drive)
     
@@ -516,6 +539,15 @@ def init_app():
         db = get_db()
         create_admin_user(db)
         db.close()
+        
+        # Register VS Code Server API router
+        try:
+            from .api.vscode_proxy import router as vscode_router
+            app.add_api_route("/api/vscode/open", vscode_router.routes[0].endpoint, methods=["GET"])
+            app.add_api_route("/api/vscode/status", vscode_router.routes[1].endpoint, methods=["GET"])
+            logger.info("VS Code Server API routes registered")
+        except Exception as e:
+            logger.warning(f"Could not register VS Code API routes: {e}")
 
         logger.info("Application initialized successfully")
 

@@ -1,25 +1,21 @@
 """
 Cronjob Scheduler Service
-Automatically executes scheduled database sync jobs
+Automatically executes scheduled database sync jobs using BackgroundSyncManager
+Also handles Ninox Documentation sync jobs
 """
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
 from ..database import get_db
-from ..models.cronjob import Cronjob, CronjobType
+from ..models.cronjob import Cronjob, CronjobType, SyncType
 from ..models.team import Team
 from ..models.server import Server
 from ..models.database import Database
-from ..utils.encryption import get_encryption_manager
-from ..utils.github_utils import sanitize_name, get_repo_name_from_server
-from ..utils.svg_erd_generator import generate_svg_erd
-from ..utils.ninox_md_generator import generate_markdown_from_backup
-from ..api.ninox_client import NinoxClient
-from ..api.github_manager import GitHubManager
+from ..models.user import User
 from ..auth import create_audit_log
-import json
-import os
+from .background_sync import get_sync_manager
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +71,9 @@ class CronjobScheduler:
             db.close()
 
     async def execute_job(self, job: Cronjob, progress_callback=None):
-        """Execute a single cronjob
+        """
+        Execute a single cronjob.
+        Routes to appropriate handler based on sync_type.
 
         Args:
             job: The cronjob to execute
@@ -88,335 +86,319 @@ class CronjobScheduler:
             job_obj.last_status = 'running'
             job_obj.last_run = datetime.utcnow()
             db.commit()
+            
+            # Get sync_type (default to DATABASE for old jobs)
+            sync_type = getattr(job_obj, 'sync_type', None) or SyncType.DATABASE
+        finally:
             db.close()
 
-            logger.info(f"  Team ID: {job.team_id}")
+        # Route to appropriate handler
+        if sync_type == SyncType.NINOX_DOCS:
+            logger.info(f"  Executing docs sync cronjob: {job.name}")
+            await self.execute_docs_sync(job, progress_callback)
+        else:
+            logger.info(f"  Executing database sync cronjob: {job.name} (Team ID: {job.team_id})")
+            await self.execute_database_sync(job, progress_callback)
 
-            # Get team and server info
+    async def execute_database_sync(self, job: Cronjob, progress_callback=None):
+        """
+        Execute a database sync cronjob using the BackgroundSyncManager.
+        This mirrors the "Sync All" behavior from the sync UI.
+        """
+
+        try:
+            # Get team, server and user info
             db = get_db()
-            team = db.query(Team).filter(Team.id == job.team_id).first()
-            server = db.query(Server).filter(Server.id == team.server_id).first()
+            try:
+                team = db.query(Team).filter(Team.id == job.team_id).first()
+                if not team:
+                    raise ValueError(f"Team {job.team_id} not found")
+                    
+                server = db.query(Server).filter(Server.id == team.server_id).first()
+                if not server:
+                    raise ValueError(f"Server for team {team.name} not found")
 
-            # Get all non-excluded databases for this team
-            databases = db.query(Database).filter(
-                Database.team_id == job.team_id,
-                Database.is_excluded == False
-            ).all()
+                # Get all non-excluded databases for this team
+                databases = db.query(Database).filter(
+                    Database.team_id == job.team_id,
+                    Database.is_excluded == False
+                ).all()
 
-            logger.info(f"  Found {len(databases)} databases to sync")
+                # Get user (server owner) for GitHub credentials
+                user = db.query(User).filter(User.id == server.user_id).first()
+                if not user:
+                    raise ValueError(f"User for server {server.name} not found")
 
-            # Get user (server owner) for GitHub credentials
-            from ..models.user import User
-            user = db.query(User).filter(User.id == server.user_id).first()
+                total_count = len(databases)
+                logger.info(f"  Found {total_count} databases to sync")
 
-            db.close()
+                if total_count == 0:
+                    logger.info(f"  No databases to sync (all excluded)")
+                    # Update job status
+                    job_obj = db.query(Cronjob).filter(Cronjob.id == job.id).first()
+                    job_obj.last_status = 'success'
+                    job_obj.last_error = 'No databases to sync (all excluded)'
+                    job_obj.run_count += 1
+                    job_obj.next_run = self.calculate_next_run(job_obj)
+                    db.commit()
+                    return
 
-            # Sync each database
-            success_count = 0
-            error_count = 0
-            total = len(databases)
+                # Store database info for background sync
+                db_infos = [(d.id, d.name) for d in databases]
+                
+            finally:
+                db.close()
 
-            for idx, database in enumerate(databases, 1):
-                try:
-                    logger.info(f"    Syncing: {database.name}")
-                    if progress_callback:
-                        progress_callback('running', f'Syncing database {idx}/{total}: {database.name}')
+            # Get sync manager (same as used by "Sync All")
+            sync_manager = get_sync_manager()
 
-                    await self.sync_database(user, server, team, database)
-                    success_count += 1
-                except Exception as e:
-                    error_count += 1
-                    logger.error(f"    Error syncing {database.name}: {e}")
+            # Check if bulk sync is already running for this team
+            if sync_manager.is_bulk_sync_active(team.id):
+                logger.warning(f"  Bulk sync already in progress for team {team.name}")
+                db = get_db()
+                job_obj = db.query(Cronjob).filter(Cronjob.id == job.id).first()
+                job_obj.last_status = 'skipped'
+                job_obj.last_error = 'Bulk sync already in progress'
+                job_obj.next_run = self.calculate_next_run(job_obj)
+                db.commit()
+                db.close()
+                return
+
+            # Start bulk sync mode (same as "Sync All")
+            sync_manager.start_bulk_sync(team.id, total_count)
+
+            if progress_callback:
+                progress_callback('running', f'Starting bulk sync for {total_count} databases')
+
+            # Start background syncs for all databases (same as "Sync All")
+            started_count = 0
+            skipped_count = 0
+
+            # Reload models fresh for background sync
+            db = get_db()
+            try:
+                user = db.query(User).filter(User.id == user.id).first()
+                server = db.query(Server).filter(Server.id == server.id).first()
+                team = db.query(Team).filter(Team.id == team.id).first()
+                
+                for db_id, db_name in db_infos:
+                    database = db.query(Database).filter(Database.id == db_id).first()
+                    if not database:
+                        continue
+                        
+                    if sync_manager.is_syncing(database.id):
+                        skipped_count += 1
+                        logger.info(f"    Skipping {db_name} - already syncing")
+                    else:
+                        started = sync_manager.start_sync(user, server, team, database)
+                        if started:
+                            started_count += 1
+                            logger.info(f"    Started background sync for {db_name}")
+                            if progress_callback:
+                                progress_callback('running', f'Started sync {started_count}/{total_count}: {db_name}')
+                        else:
+                            skipped_count += 1
+            finally:
+                db.close()
+
+            logger.info(f"  Started {started_count} syncs, skipped {skipped_count}")
+
+            # If no syncs started, end bulk sync mode
+            if started_count == 0:
+                sync_manager.end_bulk_sync()
+
+            # Wait for all syncs to complete (poll bulk sync status)
+            max_wait_seconds = 3600  # Max 1 hour
+            poll_interval = 5  # Check every 5 seconds
+            waited = 0
+
+            while sync_manager.is_bulk_sync_active(team.id) and waited < max_wait_seconds:
+                await asyncio.sleep(poll_interval)
+                waited += poll_interval
+                completed, total = sync_manager.get_bulk_sync_progress()
+                logger.info(f"  Sync progress: {completed}/{total}")
+                if progress_callback:
+                    progress_callback('running', f'Syncing: {completed}/{total} completed')
+
+            # Determine final status
+            if waited >= max_wait_seconds:
+                final_status = 'timeout'
+                error_msg = f'Timeout after {max_wait_seconds}s - syncs may still be running'
+            else:
+                final_status = 'success'
+                error_msg = None
 
             # Update job status
             db = get_db()
-            job_obj = db.query(Cronjob).filter(Cronjob.id == job.id).first()
+            try:
+                job_obj = db.query(Cronjob).filter(Cronjob.id == job.id).first()
+                job_obj.last_status = final_status
+                job_obj.last_error = error_msg
+                job_obj.run_count += 1
+                job_obj.next_run = self.calculate_next_run(job_obj)
+                db.commit()
 
-            if error_count > 0:
-                job_obj.last_status = 'partial'
-                job_obj.last_error = f'{success_count} success, {error_count} errors'
-            else:
-                job_obj.last_status = 'success'
-                job_obj.last_error = None
+                # Create audit log
+                create_audit_log(
+                    db=db,
+                    user_id=user.id,
+                    action='cronjob_executed',
+                    resource_type='cronjob',
+                    resource_id=job.id,
+                    details=f'Cronjob "{job.name}" executed: {started_count} databases synced',
+                    auto_commit=True
+                )
+            finally:
+                db.close()
 
-            job_obj.run_count += 1
-
-            # Calculate next run
-            job_obj.next_run = self.calculate_next_run(job_obj)
-
-            db.commit()
-
-            # Create audit log
-            create_audit_log(
-                db=db,
-                user_id=user.id,
-                action='cronjob_executed',
-                resource_type='cronjob',
-                resource_id=job.id,
-                details=f'Cronjob "{job.name}" executed: {success_count} success, {error_count} errors',
-                auto_commit=True
-            )
-
-            db.close()
-
-            logger.info(f"  ✓ Cronjob completed: {success_count} success, {error_count} errors")
-            logger.info(f"  Next run: {job_obj.next_run}")
+            logger.info(f"  ✓ Cronjob completed: {started_count} syncs started")
+            if progress_callback:
+                progress_callback('completed', f'Completed: {started_count} databases synced')
 
         except Exception as e:
             logger.error(f"  ✗ Job execution failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
             # Mark as error
             db = get_db()
-            job_obj = db.query(Cronjob).filter(Cronjob.id == job.id).first()
-            job_obj.last_status = 'error'
-            job_obj.last_error = str(e)[:1000]
-            job_obj.next_run = self.calculate_next_run(job_obj)
-            db.commit()
-            db.close()
-
-    async def sync_database(self, user, server, team, database, already_syncing=None):
-        """
-        Sync a single database to GitHub with cascade sync for linked databases.
-        
-        Args:
-            user: User model with GitHub credentials
-            server: Server model
-            team: Team model
-            database: Database model to sync
-            already_syncing: Set of database_ids being synced (loop protection)
-        """
-        # Initialize loop protection set
-        if already_syncing is None:
-            already_syncing = set()
-        
-        # Check if already syncing (loop protection)
-        if database.database_id in already_syncing:
-            logger.info(f"    Skipping {database.name} - already syncing (loop protection)")
-            return
-        
-        # Add to syncing set
-        already_syncing.add(database.database_id)
-        
-        # Run the synchronous operations in a thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-
-        def sync_operation():
-            """Synchronous operation to sync database"""
-            # Decrypt API key
-            encryption = get_encryption_manager()
-            api_key = encryption.decrypt(server.api_key_encrypted)
-
-            # Create Ninox client
-            client = NinoxClient(server.url, api_key)
-
-            # Fetch database structure
-            db_structure = client.get_database_structure(team.team_id, database.database_id)
-            
-            # Return structure for cascade sync check
-            return db_structure, client, encryption, api_key
-        
-        # Get structure first
-        db_structure, client, encryption, api_key = await loop.run_in_executor(None, sync_operation)
-        
-        # Check for linked databases and sync them first (cascade sync)
-        known_dbs = db_structure.get('schema', {}).get('knownDatabases', [])
-        if known_dbs:
-            logger.info(f"    Found {len(known_dbs)} linked databases")
-            
-            # Get all databases in this team
-            db_session = get_db()
             try:
-                team_databases = db_session.query(Database).filter(
-                    Database.team_id == team.id
-                ).all()
-                db_by_ninox_id = {db.database_id: db for db in team_databases}
+                job_obj = db.query(Cronjob).filter(Cronjob.id == job.id).first()
+                job_obj.last_status = 'error'
+                job_obj.last_error = str(e)[:1000]
+                job_obj.run_count += 1
+                job_obj.next_run = self.calculate_next_run(job_obj)
+                db.commit()
             finally:
-                db_session.close()
+                db.close()
             
-            for ext_db_info in known_dbs:
-                ext_db_id = ext_db_info.get('dbId')
-                ext_db_name = ext_db_info.get('name', ext_db_id)
-                
-                if ext_db_id and ext_db_id not in already_syncing:
-                    linked_db = db_by_ninox_id.get(ext_db_id)
-                    if linked_db:
-                        logger.info(f"    Cascade syncing linked DB: {ext_db_name}")
-                        try:
-                            await self.sync_database(user, server, team, linked_db, already_syncing)
-                        except Exception as link_err:
-                            logger.warning(f"    Could not cascade sync {ext_db_name}: {link_err}")
+            if progress_callback:
+                progress_callback('error', str(e))
+
+    async def execute_docs_sync(self, job: Cronjob, progress_callback=None):
+        """
+        Execute a Ninox documentation sync cronjob.
+        Downloads docs from forum.ninox.de and uploads to GitHub.
+        """
+        from .ninox_docs_service import NinoxDocsService
+        from ..utils.encryption import get_encryption_manager
         
-        # Now continue with main sync
-        def complete_sync():
-            """Complete the sync operation with all components"""
-            # Check if GitHub is configured
-            if not user.github_token_encrypted or not user.github_organization:
-                logger.warning(f"    GitHub not configured for user {user.username}")
-                return
+        try:
+            # Get user for GitHub credentials
+            db = get_db()
+            try:
+                user = db.query(User).filter(User.id == job.user_id).first()
+                if not user:
+                    raise ValueError(f"User {job.user_id} not found")
+                
+                if not user.github_token_encrypted or not user.github_organization:
+                    raise ValueError("GitHub not configured for user")
+                
+                user_id = user.id
+                github_token_encrypted = user.github_token_encrypted
+                github_org = user.github_organization
+            finally:
+                db.close()
+
+            if progress_callback:
+                progress_callback('running', 'Downloading Ninox documentation...')
+
+            # Create docs service and scrape
+            service = NinoxDocsService()
+            
+            # Run scraping in thread pool (blocking operation)
+            loop = asyncio.get_event_loop()
+            
+            def scrape_docs():
+                return service.scrape_all_documentation(delay=0.5)
+            
+            all_docs = await loop.run_in_executor(None, scrape_docs)
+            
+            func_count = len(all_docs.get('functions', {}))
+            api_count = len(all_docs.get('api', {}))
+            print_count = len(all_docs.get('print', {}))
+            
+            logger.info(f"  Scraped {func_count} functions, {api_count} API docs, {print_count} print docs")
+
+            if progress_callback:
+                progress_callback('running', f'Scraped {func_count + api_count + print_count} docs, uploading to GitHub...')
+
+            # Create markdown files
+            functions_md = service.create_functions_markdown(all_docs.get('functions', {}))
+            api_md = service.create_api_markdown(all_docs.get('api', {}))
+            print_md = service.create_print_markdown(all_docs.get('print', {}))
 
             # Decrypt GitHub token
-            github_token = encryption.decrypt(user.github_token_encrypted)
+            encryption = get_encryption_manager()
+            github_token = encryption.decrypt(github_token_encrypted)
 
-            # Use helper function to get repo name from server
-            repo_name = get_repo_name_from_server(server)
-
-            # Create GitHub manager
-            github_mgr = GitHubManager(
-                access_token=github_token,
-                organization=user.github_organization
-            )
-
-            # Ensure repository exists
-            repo = github_mgr.ensure_repository(
-                repo_name=repo_name,
-                description=f'Ninox database backups from {server.name} ({server.url})'
-            )
-
-            # Create path structure:
-            # - team-name/db-name.md (MD directly visible under team)
-            # - team-name/db-name/structure.json (details in subfolder)
-            team_name = sanitize_name(team.name)
-            db_name = sanitize_name(database.name)
-            server_name = sanitize_name(server.name)
-            github_path = f'{team_name}/{db_name}'  # Subfolder for details
-            full_path = f'{github_path}/structure.json'
-            
-            # Fetch views and reports
-            views_data = []
-            reports_data = []
-            try:
-                views_data = client.get_views(team.team_id, database.database_id, full_view=True)
-                logger.info(f"    Fetched {len(views_data)} views")
-            except Exception as e:
-                logger.warning(f"    Could not fetch views: {e}")
-            
-            try:
-                reports_data = client.get_reports(team.team_id, database.database_id, full_report=True)
-                logger.info(f"    Fetched {len(reports_data)} reports")
-            except Exception as e:
-                logger.warning(f"    Could not fetch reports: {e}")
-            
-            # Create complete backup structure
-            complete_backup = {
-                'schema': db_structure,
-                'views': views_data,
-                'reports': reports_data,
-                'report_files': {},
-                '_metadata': {
-                    'synced_at': datetime.utcnow().isoformat(),
-                    'database_name': database.name,
-                    'database_id': database.database_id,
-                    'team_name': team.name,
-                    'team_id': team.team_id,
-                    'server_name': server.name,
-                }
-            }
-
-            # Convert to JSON
-            structure_json = json.dumps(db_structure, indent=2, ensure_ascii=False)
-            backup_json = json.dumps(complete_backup, indent=2, ensure_ascii=False)
-
-            # Upload structure to GitHub
-            github_mgr.update_file(
-                repo=repo,
-                file_path=full_path,
-                content=structure_json,
-                commit_message=f'[Automated] Update {database.name} structure from {team.name}'
-            )
-            
-            # Upload complete backup (into subfolder)
-            backup_path = f'{github_path}/complete-backup.json'
-            github_mgr.update_file(
-                repo=repo,
-                file_path=backup_path,
-                content=backup_json,
-                commit_message=f'[Automated] Update {database.name} complete backup'
-            )
-            
-            # Save locally for MD generation
-            local_base_path = f'/app/data/code/{server_name}/{team_name}/{db_name}'
-            os.makedirs(local_base_path, exist_ok=True)
-            
-            with open(f'{local_base_path}/structure.json', 'w', encoding='utf-8') as f:
-                json.dump(db_structure, f, indent=2, ensure_ascii=False)
-            
-            with open(f'{local_base_path}/complete-backup.json', 'w', encoding='utf-8') as f:
-                json.dump(complete_backup, f, indent=2, ensure_ascii=False)
-            
-            # Load external DB structures from local files for MD generation
-            external_db_structures = {}
-            if known_dbs:
-                db_session = get_db()
-                try:
-                    team_databases = db_session.query(Database).filter(
-                        Database.team_id == team.id
-                    ).all()
-                    db_by_ninox_id = {db.database_id: db for db in team_databases}
-                finally:
-                    db_session.close()
-                
-                for ext_db in known_dbs:
-                    ext_db_id = ext_db.get('dbId')
-                    if ext_db_id:
-                        linked_db = db_by_ninox_id.get(ext_db_id)
-                        if linked_db:
-                            ext_db_name_safe = sanitize_name(linked_db.name)
-                            ext_local_path = f'/app/data/code/{server_name}/{team_name}/{ext_db_name_safe}/complete-backup.json'
-                            if os.path.exists(ext_local_path):
-                                try:
-                                    with open(ext_local_path, 'r', encoding='utf-8') as f:
-                                        external_db_structures[ext_db_id] = json.load(f)
-                                except Exception:
-                                    pass
-            
-            # Generate and upload Markdown documentation (directly under team folder)
-            try:
-                md_content = generate_markdown_from_backup(complete_backup, database.name, external_db_structures)
-                if md_content:
-                    md_path = f'{team_name}/{db_name}.md'  # MD directly visible under team
-                    github_mgr.update_file(
-                        repo=repo,
-                        file_path=md_path,
-                        content=md_content,
-                        commit_message=f'[Automated] Update {database.name} Markdown documentation'
-                    )
-                    logger.info(f"    ✓ Uploaded Markdown: {md_path}")
-                    
-                    # Save locally
-                    with open(f'{local_base_path}/complete-backup.md', 'w', encoding='utf-8') as f:
-                        f.write(md_content)
-            except Exception as e:
-                logger.warning(f"    Failed to generate/upload Markdown: {e}")
-
-            # Generate and upload SVG ERD diagram (into subfolder)
-            try:
-                svg_content = generate_svg_erd(db_structure)
-                logger.info(f"    Generated SVG ERD: {len(svg_content)} bytes")
-
-                # Upload SVG file
-                erd_file_path = f'{github_path}/erd.svg'
-                github_mgr.update_file(
-                    repo=repo,
-                    file_path=erd_file_path,
-                    content=svg_content,
-                    commit_message=f'[Automated] Update {database.name} ERD diagram'
+            # Upload to GitHub in thread pool
+            def upload_docs():
+                return service.upload_separate_files_to_github(
+                    functions_md,
+                    api_md,
+                    print_md,
+                    github_token,
+                    github_org,
+                    "ninox-docs"
                 )
-                logger.info(f"    ✓ Uploaded SVG ERD: {erd_file_path}")
-            except Exception as e:
-                logger.warning(f"    Failed to generate/upload ERD: {e}")
+            
+            result = await loop.run_in_executor(None, upload_docs)
 
-            # Update database record
-            db_session = get_db()
-            db_obj = db_session.query(Database).filter(Database.id == database.id).first()
-            db_obj.github_path = github_path  # Now includes db subfolder: team-name/db-name
-            db_obj.last_modified = datetime.utcnow()
-            db_session.commit()
-            db_session.close()
+            if result.get('success'):
+                final_status = 'success'
+                error_msg = None
+                logger.info(f"  ✓ Docs sync completed: {result.get('url')}")
+            else:
+                final_status = 'error'
+                error_msg = result.get('error', 'Unknown error')
+                logger.error(f"  ✗ Docs sync failed: {error_msg}")
 
-            logger.info(f"    ✓ Synced to GitHub: {full_path}")
+            # Update job status
+            db = get_db()
+            try:
+                job_obj = db.query(Cronjob).filter(Cronjob.id == job.id).first()
+                job_obj.last_status = final_status
+                job_obj.last_error = error_msg
+                job_obj.run_count += 1
+                job_obj.next_run = self.calculate_next_run(job_obj)
+                db.commit()
 
-        # Execute the complete sync in thread pool
-        await loop.run_in_executor(None, complete_sync)
+                # Create audit log
+                create_audit_log(
+                    db=db,
+                    user_id=user_id,
+                    action='cronjob_docs_sync',
+                    resource_type='cronjob',
+                    resource_id=job.id,
+                    details=f'Docs sync "{job.name}": {func_count} functions, {api_count} API, {print_count} print docs',
+                    auto_commit=True
+                )
+            finally:
+                db.close()
+
+            if progress_callback:
+                progress_callback('completed', f'Completed: {func_count + api_count + print_count} docs synced')
+
+        except Exception as e:
+            logger.error(f"  ✗ Docs sync failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+            # Mark as error
+            db = get_db()
+            try:
+                job_obj = db.query(Cronjob).filter(Cronjob.id == job.id).first()
+                job_obj.last_status = 'error'
+                job_obj.last_error = str(e)[:1000]
+                job_obj.run_count += 1
+                job_obj.next_run = self.calculate_next_run(job_obj)
+                db.commit()
+            finally:
+                db.close()
+            
+            if progress_callback:
+                progress_callback('error', str(e))
 
     def calculate_next_run(self, job: Cronjob) -> datetime:
         """Calculate next run time for a cronjob"""

@@ -40,22 +40,23 @@ class NavHeader:
                     ui.badge('Admin', color='orange').classes('ml-2')
 
             with ui.row().classes('items-center gap-4'):
-                # Dashboard (kein Dropdown)
+                # Sync als erstes (Hauptfunktion)
+                self._nav_link('Synchronization', '/sync', 'sync')
+
+                # Dashboard
                 self._nav_link('Dashboard', '/dashboard', 'dashboard')
-                
-                # Ninox Dropdown
+
+                # Ninox Dropdown (ohne Sync)
                 self._nav_dropdown('Ninox', 'cloud', [
                     ('Servers', '/servers', 'storage'),
                     ('Teams', '/teams', 'group'),
-                    ('Sync', '/sync', 'sync'),
-                ], ['servers', 'teams', 'sync'])
+                ], ['servers', 'teams'])
                 
                 # Entwicklung Dropdown
                 self._nav_dropdown('Entwicklung', 'developer_mode', [
-                    ('Code', '/code-viewer', 'code'),
-                    ('JSON', '/json-viewer', 'data_object'),
+                    ('YAML Code', '/yaml-code-viewer', 'description'),
                     ('Änderungen', '/changes', 'history'),
-                ], ['code-viewer', 'json-viewer', 'changes'])
+                ], ['yaml-code-viewer', 'changes'])
                 
                 # Einstellungen Dropdown (mit Cronjobs und Admin)
                 settings_items = [

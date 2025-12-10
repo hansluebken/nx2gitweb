@@ -1,33 +1,108 @@
 """
 SVG ERD Generator for Ninox Databases
 Generates clean, scalable SVG Entity-Relationship Diagrams using Graphviz
+Now supports direct YAML input!
 """
 import json
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Union
 from graphviz import Digraph
 import re
 
 
 class SvgErdGenerator:
-    """Generate SVG ERD diagrams from Ninox database structure"""
+    """Generate SVG ERD diagrams from Ninox database structure (YAML or JSON)"""
 
-    def __init__(self, json_structure: Dict[str, Any]):
+    def __init__(self, database_structure: Union[Dict[str, Any], 'NinoxDatabase']):
         """Initialize ERD generator
 
         Args:
-            json_structure: Ninox database structure JSON
+            database_structure: Either:
+                - NinoxDatabase object from YAML parser (preferred)
+                - JSON dict (legacy/backward compatibility)
         """
-        self.structure = json_structure
         self.tables = {}
         self.relationships = []
-        self._parse_structure()
 
-    def _parse_structure(self):
-        """Parse Ninox structure into tables and relationships"""
-        if 'schema' not in self.structure or 'types' not in self.structure['schema']:
+        # Check if it's a YAML NinoxDatabase object
+        if hasattr(database_structure, 'tables'):
+            self._parse_yaml_structure(database_structure)
+        else:
+            # Legacy JSON structure
+            self._parse_json_structure(database_structure)
+
+    def _parse_yaml_structure(self, yaml_db: 'NinoxDatabase'):
+        """Parse YAML NinoxDatabase structure into tables and relationships"""
+        # YAML structure has tables as a dict: {table_name: {fields: {...}, ...}}
+        for table_name, table_data in yaml_db.tables.items():
+            # Create unique type_id from table name (sanitize)
+            type_id = table_name.replace(' ', '_').replace('-', '_')
+
+            self.tables[type_id] = {
+                'name': table_data.get('caption', table_name),
+                'uuid': table_data.get('uuid'),
+                'fields': [],
+                'primary_key': None
+            }
+
+            # Parse fields from YAML
+            if 'fields' in table_data:
+                for field_id, field_data in table_data['fields'].items():
+                    field_type = field_data.get('base', 'string')
+                    field_caption = field_data.get('caption', field_id)
+                    is_required = field_data.get('required', False)
+
+                    # Store all reference information
+                    field_info = {
+                        'id': field_id,
+                        'caption': field_caption,
+                        'type': field_type,
+                        'required': is_required,
+                        'refTypeId': field_data.get('refTypeId'),
+                        'refTypeUUID': field_data.get('refTypeUUID'),
+                        'dbId': field_data.get('dbId'),  # External database reference
+                        'dbName': field_data.get('dbName')  # External database name
+                    }
+
+                    # Check if it's the primary key
+                    if field_id == 'id' or field_id.lower() == 'id':
+                        self.tables[type_id]['primary_key'] = field_caption
+
+                    self.tables[type_id]['fields'].append(field_info)
+
+                    # Track relationships
+                    if field_type in ['ref', 'rev']:
+                        ref_type_id = field_data.get('refTypeId')
+                        ref_type_uuid = field_data.get('refTypeUUID')
+
+                        target_type = None
+                        # Try to find target by refTypeId first
+                        if ref_type_id:
+                            target_type_name = ref_type_id.replace('_', ' ').replace('-', ' ')
+                            if target_type_name in yaml_db.tables:
+                                target_type = ref_type_id
+
+                        # Try by UUID
+                        if not target_type and ref_type_uuid:
+                            for tname, tdata in yaml_db.tables.items():
+                                if tdata.get('uuid') == ref_type_uuid:
+                                    target_type = tname.replace(' ', '_').replace('-', '_')
+                                    break
+
+                        if target_type:
+                            self.relationships.append({
+                                'from_table': type_id,
+                                'to_table': target_type,
+                                'field': field_caption,
+                                'type': field_type,
+                                'cardinality': '1:N' if field_type == 'ref' else 'N:M'
+                            })
+
+    def _parse_json_structure(self, json_structure: Dict[str, Any]):
+        """Parse legacy JSON structure into tables and relationships"""
+        if 'schema' not in json_structure or 'types' not in json_structure['schema']:
             return
 
-        types = self.structure['schema']['types']
+        types = json_structure['schema']['types']
 
         # Parse each table
         for type_id, type_data in types.items():

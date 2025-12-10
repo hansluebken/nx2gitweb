@@ -20,6 +20,7 @@ class SyncStatus(enum.Enum):
 if TYPE_CHECKING:
     from .changelog import ChangeLog
     from .documentation import Documentation
+    from .database_dependency import DatabaseDependency
 
 
 class Database(Base, TimestampMixin):
@@ -36,7 +37,15 @@ class Database(Base, TimestampMixin):
 
     # Status
     is_excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    auto_generate_docs: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # Auto-generate AI documentation (default: OFF)
+    auto_generate_erd: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)  # Auto-generate ERD diagrams
     last_modified: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # BookStack integration
+    bookstack_shelf_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # BookStack shelf ID
+    bookstack_book_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # BookStack book ID
+    auto_sync_to_bookstack: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # Auto-sync after doc generation
+    last_bookstack_sync: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # Last sync to BookStack
     
     # Sync status (for background sync tracking)
     sync_status: Mapped[str] = mapped_column(
@@ -46,15 +55,11 @@ class Database(Base, TimestampMixin):
     )
     sync_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    
-    # Google Drive integration
-    drive_document_id: Mapped[str | None] = mapped_column(String(100), nullable=True)  # Google Docs document ID
-    drive_last_upload: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Relationships
     team: Mapped["Team"] = relationship("Team", back_populates="databases")
     changelogs: Mapped[List["ChangeLog"]] = relationship(
-        "ChangeLog", 
+        "ChangeLog",
         back_populates="database",
         cascade="all, delete-orphan",
         order_by="desc(ChangeLog.commit_date)"
@@ -64,6 +69,18 @@ class Database(Base, TimestampMixin):
         back_populates="database",
         cascade="all, delete-orphan",
         order_by="desc(Documentation.generated_at)"
+    )
+    dependencies_as_source: Mapped[List["DatabaseDependency"]] = relationship(
+        "DatabaseDependency",
+        foreign_keys="DatabaseDependency.source_database_id",
+        back_populates="source_database",
+        cascade="all, delete-orphan"
+    )
+    dependencies_as_target: Mapped[List["DatabaseDependency"]] = relationship(
+        "DatabaseDependency",
+        foreign_keys="DatabaseDependency.target_database_id",
+        back_populates="target_database",
+        cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:

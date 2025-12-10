@@ -23,18 +23,30 @@ class IntervalUnit(enum.Enum):
     WEEKS = "weeks"
 
 
+class SyncType(enum.Enum):
+    """What type of sync to perform"""
+    DATABASE = "database"  # Sync team databases to GitHub
+    NINOX_DOCS = "ninox_docs"  # Sync Ninox documentation to GitHub
+
+
 class Cronjob(Base, TimestampMixin):
     """Cronjob model for scheduled synchronization"""
     __tablename__ = "cronjobs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
-    # Reference to team
-    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    # Reference to team (optional for docs sync)
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=True)
+    
+    # Reference to user (for docs sync - needs GitHub credentials)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
 
     # Cronjob configuration
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    
+    # What to sync: database or ninox_docs
+    sync_type: Mapped[SyncType] = mapped_column(SQLEnum(SyncType), default=SyncType.DATABASE, nullable=False)
 
     # Type: interval or daily_time
     job_type: Mapped[CronjobType] = mapped_column(SQLEnum(CronjobType), nullable=False)
@@ -57,7 +69,8 @@ class Cronjob(Base, TimestampMixin):
     run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # Relationships
-    team: Mapped["Team"] = relationship("Team", back_populates="cronjobs")
+    team: Mapped[Optional["Team"]] = relationship("Team", back_populates="cronjobs")
+    user: Mapped[Optional["User"]] = relationship("User")
 
     def __repr__(self) -> str:
         try:
@@ -72,3 +85,9 @@ class Cronjob(Base, TimestampMixin):
         elif self.job_type == CronjobType.DAILY_TIME:
             return f"Daily at {self.daily_time}"
         return "Unknown"
+    
+    def get_sync_type_description(self) -> str:
+        """Get human-readable sync type description"""
+        if self.sync_type == SyncType.NINOX_DOCS:
+            return "Ninox Documentation Sync"
+        return "Database Sync"

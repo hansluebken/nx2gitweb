@@ -1,10 +1,13 @@
 """
 Server model for Ninox servers
 """
-from typing import List
+from typing import List, TYPE_CHECKING
 from sqlalchemy import String, Boolean, Integer, ForeignKey, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from .bookstack_config import BookstackConfig
 
 
 class Server(Base, TimestampMixin):
@@ -34,6 +37,12 @@ class Server(Base, TimestampMixin):
     teams: Mapped[List["Team"]] = relationship(
         "Team",
         back_populates="server",
+        cascade="all, delete-orphan"
+    )
+    bookstack_config: Mapped["BookstackConfig | None"] = relationship(
+        "BookstackConfig",
+        back_populates="server",
+        uselist=False,
         cascade="all, delete-orphan"
     )
 

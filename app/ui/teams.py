@@ -8,6 +8,7 @@ from ..database import get_db
 from ..models.server import Server
 from ..models.team import Team
 from ..models.database import Database
+from ..models.user_preference import UserPreference
 from ..auth import create_audit_log
 from ..utils.encryption import get_encryption_manager
 from ..api.ninox_client import NinoxClient
@@ -45,6 +46,13 @@ def render_server_selector(user, teams_container):
     """Render server selector dropdown"""
     db = get_db()
     try:
+        # Get or create user preferences
+        preferences = db.query(UserPreference).filter(UserPreference.user_id == user.id).first()
+        if not preferences:
+            preferences = UserPreference(user_id=user.id)
+            db.add(preferences)
+            db.commit()
+
         # Get user's servers
         if user.is_admin:
             servers = db.query(Server).filter(Server.is_active == True).all()
@@ -69,12 +77,27 @@ def render_server_selector(user, teams_container):
         # Create server options
         server_options = {server.name: server for server in servers}
 
+        # Determine initial server from preferences
+        initial_server = None
+        if preferences.last_selected_server_id:
+            for server in servers:
+                if server.id == preferences.last_selected_server_id:
+                    initial_server = server.name
+                    break
+
+        # If no saved preference or server not found, use the first one
+        if not initial_server:
+            initial_server = list(server_options.keys())[0] if server_options else None
+
         with ui.row().classes('w-full items-center gap-4'):
             server_select = ui.select(
                 label='Select Server',
                 options=list(server_options.keys()),
-                value=list(server_options.keys())[0] if server_options else None
+                value=initial_server  # Use saved preference
             ).classes('flex-1')
+
+            # Filter: Nur aktive Teams anzeigen
+            show_only_active = ui.checkbox('Nur aktive Teams', value=True).classes('ml-4')
 
             ui.button(
                 'Sync Teams',
@@ -82,7 +105,8 @@ def render_server_selector(user, teams_container):
                 on_click=lambda: sync_teams_from_api(
                     user,
                     server_options[server_select.value],
-                    teams_container
+                    teams_container,
+                    show_only_active
                 )
             ).props('color=primary')
 
@@ -91,9 +115,21 @@ def render_server_selector(user, teams_container):
             # Use server_select.value directly instead of e.value
             current_server = server_select.value
             if current_server and current_server in server_options:
-                load_teams(user, server_options[current_server], teams_container)
+                # Save preference
+                selected_server = server_options[current_server]
+                preferences.last_selected_server_id = selected_server.id
+                db.commit()
+
+                load_teams(user, server_options[current_server], teams_container, show_only_active.value)
+
+        def on_filter_change(e=None):
+            # Reload teams when filter changes
+            current_server = server_select.value
+            if current_server and current_server in server_options:
+                load_teams(user, server_options[current_server], teams_container, show_only_active.value)
 
         server_select.on('update:model-value', on_server_change)
+        show_only_active.on('update:model-value', on_filter_change)
 
         # Load initial teams
         if server_select.value:
@@ -103,27 +139,39 @@ def render_server_selector(user, teams_container):
         db.close()
 
 
-def load_teams(user, server, container):
+def load_teams(user, server, container, show_only_active=True):
     """Load and display teams for a server"""
     container.clear()
 
     db = get_db()
     try:
-        teams = db.query(Team).filter(
-            Team.server_id == server.id
-        ).order_by(Team.name).all()
+        # Filter teams based on active status
+        query = db.query(Team).filter(Team.server_id == server.id)
+
+        if show_only_active:
+            query = query.filter(Team.is_active == True)
+
+        teams = query.order_by(Team.name).all()
 
         if not teams:
+            filter_text = "aktive Teams" if show_only_active else "Teams"
             with container:
                 EmptyState.render(
                     icon='group',
-                    title='No Teams',
-                    message='No teams found for this server. Click "Sync Teams" to fetch teams from Ninox.',
+                    title=f'Keine {filter_text}',
+                    message=f'Keine {filter_text} für diesen Server gefunden. Klicke "Sync Teams" um Teams vom Ninox-Server zu laden.',
                     action_label='Sync Teams',
-                    on_action=lambda: sync_teams_from_api(user, server, container)
+                    on_action=lambda: sync_teams_from_api(user, server, container, None)
                 )
         else:
             with container:
+                # Show count
+                total_count = db.query(Team).filter(Team.server_id == server.id).count()
+                if show_only_active and len(teams) < total_count:
+                    ui.label(f'{len(teams)} aktive Teams (von {total_count} gesamt)').classes('text-sm text-grey-7 mb-2')
+                else:
+                    ui.label(f'{len(teams)} Teams').classes('text-sm text-grey-7 mb-2')
+
                 for team in teams:
                     render_team_card(user, server, team, container)
 
@@ -158,20 +206,8 @@ def render_team_card(user, server, team, container):
                 if team.last_sync:
                     ui.label(f'Last Sync: {format_datetime(team.last_sync)}').classes('text-grey-7')
 
-            # Actions
+            # Actions - nur Team-Verwaltung (Activate/Deactivate)
             with ui.column().classes('gap-2'):
-                ui.button(
-                    'Sync Databases',
-                    icon='sync',
-                    on_click=lambda t=team: sync_databases_for_team(user, server, t, container)
-                ).props('flat dense color=primary')
-
-                ui.button(
-                    'View Databases',
-                    icon='folder',
-                    on_click=lambda t=team: ui.navigate.to(f'/sync?team={t.id}')
-                ).props('flat dense')
-
                 if team.is_active:
                     ui.button(
                         'Deactivate',
@@ -185,8 +221,16 @@ def render_team_card(user, server, team, container):
                         on_click=lambda t=team: toggle_team_status(user, t, True, container)
                     ).props('flat dense color=positive')
 
+                # Link zur Sync-Seite für aktive Teams (mit Server + Team vorausgewählt)
+                if team.is_active:
+                    ui.button(
+                        'Zur Sync-Seite',
+                        icon='sync',
+                        on_click=lambda t=team, s=server: ui.navigate.to(f'/sync?server={s.id}&team={t.id}')
+                    ).props('flat dense color=primary')
 
-def sync_teams_from_api(user, server, container):
+
+def sync_teams_from_api(user, server, container, show_only_active_checkbox=None):
     """Sync teams from Ninox API with progress dialog"""
     # Create progress dialog
     with ui.dialog() as dialog, ui.card().classes('w-96 p-6'):
@@ -310,8 +354,9 @@ def sync_teams_from_api(user, server, container):
             progress_msg.set_text(f'✓ Successfully synced {synced_count} teams!')
             progress_msg.classes('text-positive font-bold')
 
-            # Reload teams
-            load_teams(user, server, container)
+            # Reload teams with current filter
+            show_only_active = show_only_active_checkbox.value if show_only_active_checkbox else True
+            load_teams(user, server, container, show_only_active)
 
             # Close dialog after short delay
             await asyncio.sleep(2)

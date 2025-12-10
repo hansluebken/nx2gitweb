@@ -4,9 +4,13 @@ Supports: Claude (Anthropic), OpenAI, Google Gemini
 """
 from datetime import datetime
 from enum import Enum
-from sqlalchemy import String, Boolean, Integer, Float, DateTime, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from typing import TYPE_CHECKING
+from sqlalchemy import String, Boolean, Integer, Float, DateTime, Text, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from .prompt_template import PromptTemplate
 
 
 class AIProvider(str, Enum):
@@ -102,11 +106,23 @@ class AIConfig(Base, TimestampMixin):
     # Model parameters
     max_tokens: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
     temperature: Mapped[float] = mapped_column(Float, default=0.3, nullable=False)
-    
+
+    # Prompt template for documentation generation
+    doc_prompt_template_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_templates.id", ondelete="SET NULL"),
+        nullable=True
+    )
+
     # Connection test status
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_test_success: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_test_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Relationships
+    doc_prompt_template: Mapped["PromptTemplate | None"] = relationship(
+        "PromptTemplate",
+        foreign_keys=[doc_prompt_template_id]
+    )
 
     def __repr__(self) -> str:
         default_str = " [DEFAULT]" if self.is_default else ""
