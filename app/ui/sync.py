@@ -1331,8 +1331,7 @@ def show_documentation_viewer(database, user, server):
     import logging
     logger = logging.getLogger(__name__)
     db_path = get_database_path(server, database.team, database.name)
-    db_subfolder = f"database_{sanitize_name(database.name)}"
-    docs_file = db_path / "src" / "Objects" / db_subfolder / "APPLICATION_DOCS.md"
+    docs_file = db_path / "APPLICATION_DOCS.md"
     with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width: 1200px; max-height: 90vh;"):
         with ui.row().classes("w-full items-center justify-between p-4 bg-purple text-white"):
             with ui.column().classes("gap-0"):
