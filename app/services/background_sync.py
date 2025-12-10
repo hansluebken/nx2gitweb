@@ -296,8 +296,9 @@ class BackgroundSyncManager:
             try:
                 db_obj = db.query(Database).filter(Database.id == database_id).first()
                 if db_obj and db_obj.sync_status == SyncStatus.SYNCING.value:
-                    # Only set to idle if still syncing (not error)
+                    # Sync completed successfully - clear error and set to idle
                     db_obj.sync_status = SyncStatus.IDLE.value
+                    db_obj.sync_error = None  # Clear any previous errors
                     db_obj.last_modified = datetime.utcnow()
                     db.commit()
                     logger.info(f"Reset sync status to idle for {database_name or database_id}")

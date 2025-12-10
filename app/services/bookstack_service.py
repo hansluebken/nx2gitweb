@@ -24,17 +24,19 @@ class BookStackService:
         self,
         database: Database,
         server: Server,
-        documentation_content: str,
-        scripts_content: Optional[str] = None
+        documentation_content: Optional[str] = None,
+        scripts_content: Optional[str] = None,
+        erd_content: Optional[str] = None
     ) -> tuple[bool, Optional[str]]:
         """
-        Sync database documentation and scripts to BookStack
+        Sync database documentation, scripts, and ERD to BookStack
 
         Args:
             database: Database model
             server: Server model
-            documentation_content: Markdown documentation content
+            documentation_content: Optional markdown documentation content
             scripts_content: Optional markdown scripts content
+            erd_content: Optional SVG ERD diagram content
 
         Returns:
             (success, error_message)
@@ -98,18 +100,32 @@ class BookStackService:
                     db.merge(database)
                     db.commit()
 
-                # Update book content with documentation and optional scripts
+                # Update book content with selected content (documentation, scripts, ERD)
                 logger.info(f"Updating book content: {book_name} (ID: {book.id})")
 
                 # Prepare pages to create (book already has database name, so use simple page names)
-                pages = [
-                    ("Dokumentation", documentation_content)
-                ]
+                pages = []
+
+                # Add documentation page if available
+                if documentation_content:
+                    pages.append(("Dokumentation", documentation_content))
+                    logger.info(f"Including Dokumentation page in BookStack book {book.id}")
 
                 # Add scripts page if available
                 if scripts_content:
                     pages.append(("Scripts", scripts_content))
                     logger.info(f"Including Scripts page in BookStack book {book.id}")
+
+                # Add ERD page if available (embed SVG in markdown)
+                if erd_content:
+                    # Wrap SVG in markdown for BookStack display
+                    erd_markdown = f"# ERD-Diagramm\n\n{erd_content}"
+                    pages.append(("ERD-Diagramm", erd_markdown))
+                    logger.info(f"Including ERD page in BookStack book {book.id}")
+
+                # Check if at least one page was selected
+                if not pages:
+                    return False, "Keine Inhalte zum Übertragen ausgewählt"
 
                 logger.info(f"Creating {len(pages)} page(s) in book '{book_name}' (ID: {book.id})")
                 success = client.update_book_with_pages(book.id, pages)

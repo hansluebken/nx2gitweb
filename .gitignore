@@ -18,12 +18,21 @@ data/keys/**
 
 # Database files
 data/db/
+data/database/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
 *.db
 *.sqlite
 *.sqlite3
+
+# Ninox CLI downloads (YAML structures from ninox-dev-cli)
+data/ninox-cli/
+data/ninox-cli/**
+
+# Debug files
+data/debug/
+data/debug/**
 
 # Logs
 data/logs/

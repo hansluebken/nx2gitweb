@@ -167,10 +167,8 @@ class NinoxSyncService:
             svg_content = generate_svg_erd(yaml_db)
 
             if svg_content and '<svg' in svg_content:
-                # Save ERD as SVG file in database subfolder
-                from ..utils.github_utils import sanitize_name
-                db_subfolder = f"database_{sanitize_name(database_name)}"
-                erd_file = db_path / 'src' / 'Objects' / db_subfolder / 'erd.svg'
+                # Save ERD as SVG file on database root (same level as APPLICATION_DOCS.md)
+                erd_file = db_path / 'erd.svg'
                 erd_file.parent.mkdir(parents=True, exist_ok=True)
 
                 with open(erd_file, 'w', encoding='utf-8') as f:

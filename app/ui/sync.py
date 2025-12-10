@@ -35,6 +35,9 @@ _dialog_open_state = {'count': 0}
 # Track databases currently generating documentation with progress
 _doc_generating = {}  # Dict: database_id -> {'current': 1, 'total': 3}
 
+# Track background documentation generation tasks (persistent across pages)
+_background_doc_tasks = {}  # Dict: task_id -> {database, status, progress, start_time, ...}
+
 # Flag to force immediate refresh (set when doc generation starts)
 _force_refresh = {'needed': False}
 
@@ -333,13 +336,12 @@ def render(user, server_id_param=None, team_id_param=None):
         # Server and team selectors
         selector_container = ui.column().classes('w-full')
         databases_container = ui.column().classes('w-full gap-4 mt-4')
-        history_container = ui.column().classes('w-full gap-4 mt-4')
 
         with selector_container:
-            render_selectors(user, databases_container, history_container, server_id_param, team_id_param)
+            render_selectors(user, databases_container, server_id_param, team_id_param)
 
 
-def render_selectors(user, databases_container, history_container, server_id_param=None, team_id_param=None):
+def render_selectors(user, databases_container, server_id_param=None, team_id_param=None):
     """Render server and team selectors"""
     import logging
     logger = logging.getLogger(__name__)
@@ -498,11 +500,6 @@ def render_selectors(user, databases_container, history_container, server_id_par
                             team_options[team_select.value],
                             databases_container
                         )
-                        load_sync_history(
-                            user,
-                            team_options[team_select.value],
-                            history_container
-                        )
                 finally:
                     event_db.close()
 
@@ -531,7 +528,6 @@ def render_selectors(user, databases_container, history_container, server_id_par
                     event_db.close()
 
                 load_databases(user, server, team, databases_container)
-                load_sync_history(user, team, history_container)
             else:
                 logger.warning(f"Team change event but missing values: team={team_name}, server={server_select.value}")
 
@@ -791,8 +787,57 @@ def create_database_panel(user, server, team, container):
     # Refreshable progress box (separate from database list for performance)
     @ui.refreshable
     def progress_box():
-        """Show active documentation generations"""
-        if _doc_generating:
+        """Show active background documentation generation tasks"""
+        if _background_doc_tasks:
+            # Show background doc tasks
+            for task_id, task in list(_background_doc_tasks.items()):
+                status = task.get('status', 'running')
+                phase = task.get('phase', 'unknown')
+                db_name = task.get('database_name', 'Unknown')
+                message = task.get('message', '')
+                progress = task.get('progress', '')
+
+                # Determine card color based on status
+                if status == 'completed':
+                    bg_color = 'bg-green-50 border-green-500'
+                    icon_name = 'check_circle'
+                    icon_color = 'green'
+                elif status == 'failed':
+                    bg_color = 'bg-red-50 border-red-500'
+                    icon_name = 'error'
+                    icon_color = 'red'
+                else:
+                    bg_color = 'bg-purple-50 border-purple-500'
+                    icon_name = 'auto_awesome'
+                    icon_color = 'purple'
+
+                with ui.card().classes(f'w-full p-3 {bg_color} border-l-4 mb-2'):
+                    with ui.row().classes('w-full items-center justify-between gap-3'):
+                        with ui.row().classes('items-center gap-3 flex-1'):
+                            if status == 'running':
+                                ui.spinner(size='md', color=icon_color)
+                            else:
+                                ui.icon(icon_name, size='md', color=icon_color)
+
+                            with ui.column().classes('gap-1'):
+                                ui.label(f'Dokumentation: {db_name}').classes('text-sm font-bold')
+                                ui.label(message).classes('text-xs text-grey-700')
+                                if progress and status == 'running':
+                                    ui.label(f'Fortschritt: {progress}').classes('text-xs text-grey-600')
+
+                        # Remove button for completed/failed tasks
+                        if status in ['completed', 'failed']:
+                            def remove_task(tid=task_id):
+                                _background_doc_tasks.pop(tid, None)
+                                progress_box.refresh()
+
+                            ui.button(
+                                icon='close',
+                                on_click=remove_task
+                            ).props('flat dense round size=sm')
+
+        elif _doc_generating:
+            # Fallback: Show old-style doc generating (should not happen anymore)
             db = get_db()
             try:
                 with ui.card().classes('w-full p-3 bg-purple-50 border-l-4 border-purple-500 mb-4'):
@@ -1030,6 +1075,7 @@ def create_database_panel(user, server, team, container):
 
         # Check if any documentation is being generated
         docs_generating = len(_doc_generating) > 0
+        background_tasks_active = len(_background_doc_tasks) > 0
 
         # Check if force refresh is needed
         force = _force_refresh['needed']
@@ -1038,7 +1084,7 @@ def create_database_panel(user, server, team, container):
             # Syncing - refresh full database list (to update sync status)
             logger.info(f"Auto-refresh: syncing={syncing_count}, bulk={bulk_active}")
             database_list.refresh()
-        elif docs_generating or force:
+        elif docs_generating or background_tasks_active or force:
             # Doc generation - smart refresh (only when needed)
             logger.info(f"Auto-refresh: docs_gen={len(_doc_generating)}, force={force}")
 
@@ -1055,12 +1101,19 @@ def create_database_panel(user, server, team, container):
             check_and_refresh._last_doc_state = current_state
 
             # Refresh progress box (always)
-            if 'progress' in refresh_holder and refresh_holder['progress']:
-                refresh_holder['progress'].refresh()
+            progress_box.refresh()
 
-            # Refresh database list only when needed
-            if force or state_changed:
-                logger.info(f"Refreshing database list (force={force}, state_changed={state_changed})")
+            # Check if any background task changed status
+            background_task_completed = False
+            if background_tasks_active:
+                for task in _background_doc_tasks.values():
+                    if task.get('status') in ['completed', 'failed']:
+                        background_task_completed = True
+                        break
+
+            # Refresh database list when needed
+            if force or state_changed or background_task_completed:
+                logger.info(f"Refreshing database list (force={force}, state_changed={state_changed}, bg_completed={background_task_completed})")
                 database_list.refresh()
             else:
                 logger.debug("No changes - skipping database list refresh")
@@ -1194,8 +1247,14 @@ def render_database_card(user, server, team, database, container, bulk_sync_acti
                         auto_docs_cb.on('update:model-value', lambda e, db_id=database.id: toggle_auto_docs(db_id, auto_docs_cb.value))
                         auto_docs_cb.tooltip('Automatische AI-Dokumentation beim Sync generieren')
 
-                # Show documentation status (generation + BookStack sync)
+                # Show status: Sync, Documentation, BookStack
                 with ui.column().classes('gap-1 mt-1'):
+                    # Show last YAML sync
+                    if database.last_modified:
+                        with ui.row().classes('items-center gap-1'):
+                            ui.icon('sync', size='xs').classes('text-blue')
+                            ui.label(f'Sync: {format_datetime(database.last_modified)}').classes('text-xs text-grey-7')
+
                     # Show last documentation generation
                     latest_doc = database.latest_documentation if hasattr(database, 'latest_documentation') else None
                     if latest_doc and hasattr(latest_doc, 'generated_at') and latest_doc.generated_at:
@@ -1403,10 +1462,8 @@ def show_yaml_erd_from_sync(database: Database):
                 cli_service = get_ninox_cli_service()
                 db_path = get_database_path(server, database.team, database.name)
 
-                # Check if pre-generated ERD exists (new structure with database subfolder)
-                from ..utils.github_utils import sanitize_name
-                db_subfolder = f"database_{sanitize_name(database.name)}"
-                erd_file = db_path / 'src' / 'Objects' / db_subfolder / 'erd.svg'
+                # Check if pre-generated ERD exists (on database root level)
+                erd_file = db_path / 'erd.svg'
 
                 if erd_file.exists():
                     # Load pre-generated ERD (instant!)
@@ -2246,8 +2303,8 @@ def show_erd_viewer_dialog(user, server, team, database):
                 logger.error(f"Repository '{repo_name}' not found. Available repos: {all_repos}")
                 raise Exception(f"Repository '{repo_name}' not found. Available: {', '.join(all_repos[:5])}")
 
-            db_name = sanitize_name(database.name)
-            erd_path = f'{database.github_path}/{db_name}-erd.svg'
+            # ERD is now on database root level (same as APPLICATION_DOCS.md)
+            erd_path = f'{database.github_path}/erd.svg'
 
             with client_context:
                 status_label.text = f'Loading: {erd_path}...'
@@ -2339,50 +2396,6 @@ def show_erd_viewer_dialog(user, server, team, database):
 
     # Use asyncio.create_task instead of background_tasks (keeps UI context)
     asyncio.create_task(load_svg())
-
-
-def load_sync_history(user, team, container):
-    """Load and display sync history"""
-    container.clear()
-
-    db = get_db()
-    try:
-        # Get recent sync audit logs
-        logs = db.query(AuditLog).filter(
-            AuditLog.action.in_(['database_synced', 'databases_synced']),
-            AuditLog.resource_type.in_(['database', 'team'])
-        ).order_by(AuditLog.created_at.desc()).limit(10).all()
-
-        with container:
-            with Card(title='Sync History', icon='history'):
-                if not logs:
-                    ui.label('No sync history available.').classes('text-grey-7')
-                else:
-                    with ui.column().classes('w-full gap-2'):
-                        for log in logs:
-                            with ui.card().classes('w-full p-3').style(
-                                'background-color: #f5f5f5;'
-                            ):
-                                with ui.row().classes('w-full items-center justify-between'):
-                                    with ui.column().classes('gap-1'):
-                                        ui.label(log.details).classes('font-medium')
-                                        ui.label(
-                                            f'User ID: {log.user_id}'
-                                        ).classes('text-caption text-grey-7')
-                                    with ui.column().classes('gap-1 items-end'):
-                                        with ui.row().classes('items-center gap-1'):
-                                            ui.icon('check_circle', size='sm').classes(
-                                                'text-positive'
-                                            )
-                                            ui.label('Success').classes(
-                                                'text-caption text-positive'
-                                            )
-                                        ui.label(
-                                            format_datetime(log.created_at)
-                                        ).classes('text-caption text-grey-7')
-
-    finally:
-        db.close()
 
 
 def show_documentation_dialog(user, server, team, database):
@@ -2791,11 +2804,11 @@ def toggle_all_auto_erd(user, server: Server, team: Team, database_list_refresha
 
 
 def generate_documentation_for_database(database: Database, user, server: Server, team: Team, container):
-    """Manually trigger documentation generation for a single database (runs in thread)"""
+    """Show dialog for documentation generation with optional sync"""
     import logging
-    import threading
-    from ..services.ninox_sync_service import get_ninox_sync_service
+    from ..models.database_dependency import DatabaseDependency
     from ..utils.path_resolver import get_database_path
+    from datetime import datetime
 
     logger = logging.getLogger(__name__)
 
@@ -2804,162 +2817,431 @@ def generate_documentation_for_database(database: Database, user, server: Server
         ui.notify(f'Dokumentation für {database.name} wird bereits generiert!', type='warning')
         return
 
-    logger.info(f"Manual documentation generation triggered for: {database.name}")
+    logger.info(f"Documentation generation dialog opened for: {database.name}")
 
-    # Add to generating dict with initial progress
-    _doc_generating[database.id] = {'current': 0, 'total': 1}
+    # Scan for dependencies directly from YAML files (always up-to-date)
+    linked_dbs = []
+    db = get_db()
+    try:
+        # Read YAML to find cross-DB references
+        db_path = get_database_path(server, team, database.name)
 
-    # Force immediate refresh on next timer tick
-    _force_refresh['needed'] = True
-
-    # Show notification
-    ui.notify(
-        f'⏳ Dokumentations-Generierung gestartet für {database.name}\n'
-        f'Läuft im Hintergrund (~1-2 Min). Sie können weiterarbeiten!',
-        type='info',
-        timeout=5000
-    )
-
-    # Note: Auto-refresh timer (every 5s) will show progress automatically
-    # No need for immediate reload - user will see progress within 5 seconds
-
-    def progress_callback(current, total):
-        """Update progress in global dict"""
-        _doc_generating[database.id] = {'current': current, 'total': total}
-        logger.info(f"Docs progress for {database.name}: Batch {current}/{total}")
-
-    def generate_in_thread():
-        """Run in separate thread to avoid blocking UI"""
-        try:
-            logger.info(f"Thread: Starting docs generation for {database.name}")
-
-            # Get database path
-            db_path = get_database_path(server, team, database.name)
-
-            if not db_path or not db_path.exists():
-                logger.error(f"Database path not found: {db_path}")
-                _doc_generating.pop(database.id, None)
-                return
-
-            # Generate documentation with progress callback
+        if db_path and db_path.exists():
             from ..utils.ninox_yaml_parser import NinoxYAMLParser
-            from ..services.doc_generator import get_documentation_generator
 
-            # Parse database
             parser = NinoxYAMLParser(str(db_path))
             databases = parser.get_all_databases()
 
-            if not databases:
-                logger.error(f"No databases found in {db_path}")
-                _doc_generating.pop(database.id, None)
-                return
+            if databases:
+                yaml_db = databases[0]
 
-            yaml_db = databases[0]
+                # Find all fields with cross-DB references
+                external_db_ids = set()
+                for table_name, table_data in yaml_db.tables.items():
+                    for field_id, field_data in table_data.get('fields', {}).items():
+                        # Check for external DB reference
+                        db_id = field_data.get('dbId')
+                        db_name = field_data.get('dbName')
 
-            # Get generator
-            generator = get_documentation_generator()
-            if not generator:
-                logger.error("No documentation generator available")
-                _doc_generating.pop(database.id, None)
-                return
+                        if db_id and db_id != database.database_id:
+                            external_db_ids.add(db_id)
+                        elif db_name:
+                            external_db_ids.add(db_name)
 
-            # Generate with progress callback
-            structure_dict = yaml_db.to_dict_for_docs()
-            result = generator.generate(structure_dict, yaml_db.name, progress_callback=progress_callback)
+                logger.info(f"Found {len(external_db_ids)} external DB references in YAML: {external_db_ids}")
 
-            if result.success:
-                # Save to file and database
-                from ..models.documentation import Documentation
-                from ..services.ninox_sync_service import commit_changes
-                from ..utils.github_utils import sanitize_name
+                # Look up these databases in our system
+                for ext_db_id in external_db_ids:
+                    # Try to find by database_id or name
+                    target_db = db.query(Database).filter(
+                        (Database.database_id == ext_db_id) | (Database.name == ext_db_id)
+                    ).first()
 
-                db_conn = get_db()
-                try:
-                    # Save to database
-                    doc = Documentation(
-                        database_id=database.id,
-                        content=result.content,
-                        model=result.model,
-                        input_tokens=result.input_tokens,
-                        output_tokens=result.output_tokens
-                    )
-                    db_conn.add(doc)
-                    db_conn.commit()
-
-                    # Save to file directly at database root for better visibility in GitHub
-                    docs_file = db_path / 'APPLICATION_DOCS.md'
-                    docs_file.parent.mkdir(parents=True, exist_ok=True)
-
-                    with open(docs_file, 'w', encoding='utf-8') as f:
-                        f.write(result.content)
-
-                    # Also generate scripts.md with all code
-                    from ..utils.scripts_md_generator import generate_scripts_md
-
-                    scripts_content = generate_scripts_md(yaml_db)
-                    scripts_file = db_path / 'SCRIPTS.md'
-                    scripts_file.parent.mkdir(parents=True, exist_ok=True)
-
-                    with open(scripts_file, 'w', encoding='utf-8') as f:
-                        f.write(scripts_content)
-
-                    logger.info(f"✓ Scripts saved for {database.name}")
-
-                    # Commit to git (both docs and scripts)
-                    # db_path = /ninox-cli/{server}/{team}/{database}
-                    # server_path = /ninox-cli/{server}/ (Git repo root)
-                    server_path = db_path.parent.parent
-                    commit_changes(server_path, f"Update documentation and scripts for {yaml_db.name}")
-
-                    logger.info(f"✓ Documentation and scripts saved for {database.name}")
-
-                    # Push to GitHub if user has GitHub configured
-                    if user and user.github_token_encrypted:
-                        try:
-                            import subprocess
-                            logger.info("📤 Pushing documentation and scripts to GitHub...")
-                            push_result = subprocess.run(
-                                ['git', 'push'],
-                                cwd=server_path,
-                                capture_output=True,
-                                text=True
-                            )
-                            if push_result.returncode == 0:
-                                logger.info("✅ Documentation and scripts pushed to GitHub successfully")
+                    if target_db:
+                        # Calculate time since last sync
+                        time_since_sync = "nie"
+                        if target_db.last_modified:
+                            delta = datetime.utcnow() - target_db.last_modified
+                            hours = int(delta.total_seconds() / 3600)
+                            if hours < 1:
+                                time_since_sync = "vor < 1 Std."
+                            elif hours < 24:
+                                time_since_sync = f"vor {hours} Std."
                             else:
-                                logger.warning(f"GitHub push failed: {push_result.stderr}")
-                        except Exception as e:
-                            logger.warning(f"GitHub push failed (non-critical): {e}")
+                                days = int(hours / 24)
+                                time_since_sync = f"vor {days} Tag{'en' if days > 1 else ''}"
 
-                finally:
-                    db_conn.close()
+                        linked_dbs.append({
+                            'db': target_db,
+                            'time_since_sync': time_since_sync
+                        })
+                        logger.info(f"  Found linked DB: {target_db.name} (last sync: {time_since_sync})")
+                    else:
+                        logger.warning(f"External DB '{ext_db_id}' referenced but not found in system")
+
+        # Check when main database was last synced
+        main_time_since_sync = "nie"
+        if database.last_modified:
+            delta = datetime.utcnow() - database.last_modified
+            hours = int(delta.total_seconds() / 3600)
+            if hours < 1:
+                main_time_since_sync = "vor < 1 Std."
+            elif hours < 24:
+                main_time_since_sync = f"vor {hours} Std."
             else:
-                logger.error(f"Documentation generation failed: {result.error}")
+                days = int(hours / 24)
+                main_time_since_sync = f"vor {days} Tag{'en' if days > 1 else ''}"
 
-        except Exception as e:
-            logger.error(f"Error generating documentation for {database.name}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+    finally:
+        db.close()
+
+    logger.info(f"Found {len(linked_dbs)} linked databases for {database.name}")
+
+    # Mark dialog as open (prevents auto-refresh)
+    _dialog_open_state['count'] += 1
+
+    def on_dialog_close():
+        """Cleanup when dialog closes"""
+        _dialog_open_state['count'] -= 1
+        dialog.close()
+
+    # Show options dialog
+    with ui.dialog() as dialog, ui.card().classes('w-full').style('max-width: 600px;'):
+        with ui.row().classes('w-full items-center justify-between p-4 bg-purple text-white'):
+            ui.label(f'Dokumentation generieren: {database.name}').classes('text-h6 font-bold')
+            close_btn = ui.button(icon='close', on_click=on_dialog_close).props('flat color=white round')
+
+        # Options container
+        options_container = ui.column().classes('w-full p-6 gap-4')
+        with options_container:
+            ui.label('Sync-Optionen:').classes('text-subtitle1 font-bold')
+
+            # Main sync checkbox
+            with ui.column().classes('gap-2'):
+                sync_main_cb = ui.checkbox(
+                    f'YAML vorher neu von Ninox syncen',
+                    value=False
+                ).classes('text-base')
+
+                with ui.row().classes('items-center gap-2 ml-8'):
+                    ui.icon('schedule', size='xs', color='grey')
+                    ui.label(f'Letzter Sync: {main_time_since_sync}').classes('text-xs text-grey-6')
+
+                ui.label('Empfohlen wenn Datenbankstruktur geändert wurde').classes('text-xs text-grey-6 ml-8')
+
+            # Show linked databases if any
+            if linked_dbs:
+                ui.separator()
+
+                with ui.column().classes('gap-2'):
+                    with ui.row().classes('items-center gap-2'):
+                        ui.icon('link', size='sm', color='blue')
+                        ui.label(f'{len(linked_dbs)} verknüpfte Datenbank{"en" if len(linked_dbs) > 1 else ""} gefunden:').classes('text-subtitle2 font-bold')
+
+                    # List linked databases
+                    for linked in linked_dbs:
+                        with ui.row().classes('items-center gap-2 ml-6'):
+                            ui.icon('database', size='xs', color='grey')
+                            ui.label(f"{linked['db'].name}").classes('text-sm')
+                            ui.label(f"({linked['time_since_sync']})").classes('text-xs text-grey-6')
+
+                    # Cascade sync checkbox
+                    sync_cascade_cb = ui.checkbox(
+                        'Verknüpfte DBs auch neu syncen',
+                        value=False
+                    ).classes('text-sm mt-2')
+                    sync_cascade_cb.bind_enabled_from(sync_main_cb, 'value')
+                    ui.label('Nur aktiv wenn YAML-Sync aktiviert ist').classes('text-xs text-grey-6 ml-8')
+            else:
+                sync_cascade_cb = None
+
+            ui.separator()
+
+            # Info about what will be generated
+            with ui.row().classes('items-center gap-2'):
+                ui.icon('info', size='sm', color='blue')
+                ui.label('Wird generiert: APPLICATION_DOCS.md + SCRIPTS.md').classes('text-sm text-grey-7')
+
+            # Buttons
+            with ui.row().classes('w-full justify-end gap-2 mt-4'):
+                ui.button('Abbrechen', on_click=on_dialog_close).props('flat')
+
+                def start_generation():
+                    # Get options
+                    do_sync = sync_main_cb.value
+                    do_cascade = sync_cascade_cb.value if sync_cascade_cb else False
+
+                    # Close dialog immediately
+                    on_dialog_close()
+
+                    # Start background task
+                    import uuid
+                    import threading
+                    from datetime import datetime
+
+                    task_id = f"doc_gen_{database.id}_{uuid.uuid4().hex[:8]}"
+
+                    # Create task info
+                    _background_doc_tasks[task_id] = {
+                        'database_id': database.id,
+                        'database_name': database.name,
+                        'status': 'running',
+                        'phase': 'sync' if do_sync else 'generating',
+                        'progress': '0/0',
+                        'start_time': datetime.now(),
+                        'do_sync': do_sync,
+                        'do_cascade': do_cascade,
+                        'total_dbs': 1 + (len(linked_dbs) if do_cascade else 0),
+                        'synced_dbs': 0,
+                        'message': 'Startet...'
+                    }
+
+                    logger.info(f"Starting background doc generation task: {task_id}")
+
+                    # Start in background thread
+                    def run_task():
+                        _run_background_doc_generation(
+                            task_id, database, user, server, team,
+                            linked_dbs, do_sync, do_cascade
+                        )
+
+                    thread = threading.Thread(target=run_task, daemon=True)
+                    thread.start()
+
+                    # Force refresh to show progress bar
+                    _force_refresh['needed'] = True
+
+                ui.button('Generieren', icon='auto_awesome', on_click=start_generation).props('color=purple')
+
+        # Progress container (initially hidden)
+        progress_container = ui.column().classes('w-full p-6 gap-4 items-center').style('display: none;')
+
+    dialog.open()
+
+
+def _run_background_doc_generation(task_id, database, user, server, team, linked_dbs, do_sync, do_cascade):
+    """Run documentation generation in background with progress tracking"""
+    import logging
+    import asyncio
+    from datetime import datetime
+    from ..utils.path_resolver import get_database_path
+    from ..services.ninox_sync_service import get_ninox_sync_service
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        logger.info(f"=== Background doc generation started: {task_id} ===")
+        logger.info(f"Options: sync={do_sync}, cascade={do_cascade}, linked_dbs={len(linked_dbs)}")
+
+        task = _background_doc_tasks[task_id]
+
+        # Phase 1: Optional Sync
+        if do_sync:
+            task['phase'] = 'sync'
+            task['message'] = 'Synchronisiere YAML...'
+
+            dbs_to_sync = [database]
+            if do_cascade and linked_dbs:
+                dbs_to_sync.extend([linked['db'] for linked in linked_dbs])
+
+            total_dbs = len(dbs_to_sync)
+            logger.info(f"Will sync {total_dbs} databases")
+
+            # Sync each database
+            from ..models.team import Team as TeamModel
+            sync_service = get_ninox_sync_service()
+
+            for i, db_item in enumerate(dbs_to_sync):
+                db_name = db_item.name
+                db_id = db_item.database_id
+
+                task['message'] = f'Syncen ({i+1}/{total_dbs}): {db_name}'
+                task['progress'] = f'{i+1}/{total_dbs}'
+                logger.info(f"Syncing {i+1}/{total_dbs}: {db_name}")
+
+                try:
+                    # Get fresh team from database
+                    db_conn = get_db()
+                    try:
+                        db_fresh = db_conn.query(Database).filter(Database.id == db_item.id).first()
+                        if db_fresh:
+                            db_team = db_conn.query(TeamModel).filter(TeamModel.id == db_fresh.team_id).first()
+                        else:
+                            db_team = team
+                    finally:
+                        db_conn.close()
+
+                    # Sync
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+                    result = loop.run_until_complete(
+                        sync_service.sync_database_async(
+                            server, db_team, db_id,
+                            timeout=600,  # 10 minutes for large databases
+                            user=user,
+                            generate_erd=True,
+                            generate_docs=False
+                        )
+                    )
+                    loop.close()
+
+                    if result.success:
+                        task['synced_dbs'] = i + 1
+                        logger.info(f"✓ Synced {db_name}")
+
+                        # Update database status after successful sync
+                        db_conn = get_db()
+                        try:
+                            db_fresh = db_conn.query(Database).filter(Database.id == db_item.id).first()
+                            if db_fresh:
+                                db_fresh.sync_status = 'idle'
+                                db_fresh.sync_error = None
+                                db_fresh.last_modified = datetime.now()
+
+                                # Commit database status first
+                                db_conn.commit()
+
+                                # Create audit log entry with auto_commit (uses own session)
+                                create_audit_log(
+                                    db=None,
+                                    user_id=user.id,
+                                    action='database_synced',
+                                    resource_type='database',
+                                    resource_id=db_fresh.id,
+                                    details=f'Cascade sync: {db_name}',
+                                    auto_commit=True
+                                )
+                                logger.info(f"✓ Updated database status and created audit log for {db_name}")
+                        finally:
+                            db_conn.close()
+                    else:
+                        logger.warning(f"Sync failed for {db_name}: {result.error}")
+
+                except Exception as e:
+                    logger.error(f"Error syncing {db_name}: {e}")
+
+            logger.info(f"✓ Sync phase completed ({total_dbs} DBs)")
+
+        # Phase 2: Generate Documentation
+        task['phase'] = 'generating'
+        task['message'] = 'Generiere Dokumentation...'
+        task['progress'] = '0/1'
+
+        logger.info(f"Starting documentation generation")
+
+        db_path = get_database_path(server, team, database.name)
+
+        if not db_path or not db_path.exists():
+            raise Exception(f"Database path not found: {db_path}")
+
+        from ..utils.ninox_yaml_parser import NinoxYAMLParser
+        from ..services.doc_generator import get_documentation_generator
+
+        parser = NinoxYAMLParser(str(db_path))
+        databases = parser.get_all_databases()
+
+        if not databases:
+            raise Exception(f"No databases found in {db_path}")
+
+        yaml_db = databases[0]
+        generator = get_documentation_generator()
+
+        if not generator:
+            raise Exception("Gemini not configured")
+
+        def batch_progress(current, total):
+            task['message'] = f'Generiere Doku (Batch {current}/{total})'
+            task['progress'] = f'{current}/{total}'
+
+        structure_dict = yaml_db.to_dict_for_docs()
+        result = generator.generate(structure_dict, yaml_db.name, progress_callback=batch_progress)
+
+        if not result.success:
+            raise Exception(f"Documentation generation failed: {result.error}")
+
+        # Phase 3: Save
+        task['phase'] = 'saving'
+        task['message'] = 'Speichere Dokumentation...'
+
+        from ..models.documentation import Documentation
+        from ..services.ninox_sync_service import commit_changes
+
+        db_conn = get_db()
+        try:
+            # Save to database
+            doc = Documentation(
+                database_id=database.id,
+                content=result.content,
+                model=result.model,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens
+            )
+            db_conn.add(doc)
+            db_conn.commit()
+
+            # Save to files
+            docs_file = db_path / 'APPLICATION_DOCS.md'
+            docs_file.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(docs_file, 'w', encoding='utf-8') as f:
+                f.write(result.content)
+
+            from ..utils.scripts_md_generator import generate_scripts_md
+            scripts_content = generate_scripts_md(yaml_db)
+            scripts_file = db_path / 'SCRIPTS.md'
+
+            with open(scripts_file, 'w', encoding='utf-8') as f:
+                f.write(scripts_content)
+
+            # Commit and push
+            server_path = db_path.parent.parent
+            commit_changes(server_path, f"Update documentation and scripts for {yaml_db.name}")
+
+            if user and user.github_token_encrypted:
+                import subprocess
+                subprocess.run(['git', 'push'], cwd=server_path, capture_output=True)
+
         finally:
-            # Remove from generating dict
-            _doc_generating.pop(database.id, None)
-            # Force refresh to hide progress indicators
-            _force_refresh['needed'] = True
-            logger.info(f"✓ Documentation generation finished for {database.name} - force refresh set")
+            db_conn.close()
 
-    # Start in separate thread (non-blocking)
-    thread = threading.Thread(target=generate_in_thread, daemon=True)
-    thread.start()
-    logger.info(f"✓ Documentation generation thread started for {database.name}")
+        # Success!
+        task['status'] = 'completed'
+        task['phase'] = 'done'
+        task['message'] = 'Erfolgreich abgeschlossen!'
+        task['end_time'] = datetime.now()
+        task['total_tokens'] = result.input_tokens + result.output_tokens
+
+        logger.info(f"✓ Background doc generation completed: {task_id}")
+        _force_refresh['needed'] = True
+
+    except Exception as e:
+        logger.error(f"Error in background doc generation: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+        # Mark as failed
+        if task_id in _background_doc_tasks:
+            _background_doc_tasks[task_id]['status'] = 'failed'
+            _background_doc_tasks[task_id]['phase'] = 'error'
+            _background_doc_tasks[task_id]['message'] = str(e)
+            _background_doc_tasks[task_id]['end_time'] = datetime.now()
+
+        _force_refresh['needed'] = True
+
+    finally:
+        # Remove from generating dict
+        _doc_generating.pop(database.id, None)
 
 
 def sync_to_bookstack(database: Database, user, server: Server, team: Team):
-    """Sync database documentation to BookStack"""
+    """Sync database documentation to BookStack - shows selection dialog first"""
     import logging
     from ..services.bookstack_service import get_bookstack_service
     from ..models.documentation import Documentation
 
     logger = logging.getLogger(__name__)
+    logger.info(f"sync_to_bookstack called for database: {database.name}")
 
     # Check if BookStack is configured for this server
     db = get_db()
@@ -2979,82 +3261,225 @@ def sync_to_bookstack(database: Database, user, server: Server, team: Team):
             )
             return
 
-        # Get latest documentation
+        # Get latest documentation (optional - will be shown in dialog)
         doc = db.query(Documentation).filter(
             Documentation.database_id == database.id
         ).order_by(Documentation.generated_at.desc()).first()
 
-        if not doc or not doc.content:
+        # Check what content is available
+        from ..utils.path_resolver import get_database_path
+        db_path = get_database_path(server, team, database.name)
+
+        has_docs = doc and doc.content
+        has_scripts = False
+        has_erd = False
+
+        if db_path and db_path.exists():
+            scripts_file = db_path / 'SCRIPTS.md'
+            erd_file = db_path / 'erd.svg'
+            has_scripts = scripts_file.exists()
+            has_erd = erd_file.exists()
+
+        # Check if at least one content type is available
+        if not any([has_docs, has_scripts, has_erd]):
             ui.notify(
-                f'Keine Dokumentation vorhanden für {database.name}\n'
-                f'Bitte generieren Sie zuerst eine Dokumentation mit "GEN DOKU".',
+                f'Keine Inhalte zum Übertragen verfügbar für {database.name}\n'
+                f'Bitte generieren Sie zuerst Dokumentation mit "GEN DOKU" und führen Sie einen Sync durch.',
                 type='warning',
                 timeout=5000
             )
             return
 
-        # Try to read SCRIPTS.md from file system
-        scripts_content = None
-        try:
-            from ..utils.path_resolver import get_database_path
-            db_path = get_database_path(server, team, database.name)
+        # Show selection dialog
+        logger.info(f"Opening BookStack selection dialog with: docs={has_docs}, scripts={has_scripts}, erd={has_erd}")
+        with ui.dialog() as dialog, ui.card().classes('w-full').style('max-width: 500px;'):
+            with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
+                ui.label(f'BookStack-Übertragung: {database.name}').classes('text-h6 font-bold')
+                close_btn = ui.button(icon='close', on_click=dialog.close).props('flat color=white round')
 
-            if db_path and db_path.exists():
-                scripts_file = db_path / 'SCRIPTS.md'
-                if scripts_file.exists():
-                    with open(scripts_file, 'r', encoding='utf-8') as f:
-                        scripts_content = f.read()
-                    logger.info(f"Found SCRIPTS.md for {database.name} - will include in BookStack sync")
-                else:
-                    logger.info(f"No SCRIPTS.md found for {database.name} - will only sync documentation")
-        except Exception as e:
-            logger.warning(f"Could not read SCRIPTS.md: {e}")
+            # Selection container (will be hidden during sync)
+            selection_container = ui.column().classes('w-full p-6 gap-4')
+            with selection_container:
+                ui.label('Wählen Sie die zu übertragenden Inhalte:').classes('text-subtitle1 font-bold')
 
-        # Show notification
-        pages_info = "Dokumentation + Scripts" if scripts_content else "Dokumentation"
-        ui.notify(
-            f'⏳ Übertrage {database.name} zu BookStack...\n'
-            f'Inhalt: {pages_info}\n'
-            f'Shelf: {bs_config.default_shelf_name}',
-            type='info'
-        )
+                # Checkboxes for content selection (all checked by default)
+                docs_checkbox = ui.checkbox('Dokumentation (APPLICATION_DOCS.md)', value=has_docs).props('disable' if not has_docs else '')
+                if not has_docs:
+                    ui.label('Keine Dokumentation vorhanden').classes('text-xs text-grey-6 ml-8 -mt-2')
 
-        # Sync to BookStack
-        bookstack_service = get_bookstack_service()
-        success, result = bookstack_service.sync_database_to_bookstack(
-            database,
-            server,
-            doc.content,
-            scripts_content
-        )
+                scripts_checkbox = ui.checkbox('Scripts (SCRIPTS.md)', value=has_scripts).props('disable' if not has_scripts else '')
+                if not has_scripts:
+                    ui.label('Keine Scripts vorhanden').classes('text-xs text-grey-6 ml-8 -mt-2')
 
-        if success:
-            # Get updated database to show sync time
-            db_updated = db.query(Database).filter(Database.id == database.id).first()
-            sync_time = db_updated.last_bookstack_sync.strftime('%d.%m.%Y %H:%M') if db_updated and db_updated.last_bookstack_sync else 'Jetzt'
+                erd_checkbox = ui.checkbox('ERD-Diagramm (erd.svg)', value=has_erd).props('disable' if not has_erd else '')
+                if not has_erd:
+                    ui.label('Kein ERD vorhanden').classes('text-xs text-grey-6 ml-8 -mt-2')
 
-            pages_count = 2 if scripts_content else 1
-            pages_text = f"({pages_count} Seiten)" if scripts_content else "(1 Seite)"
+                ui.separator()
 
-            ui.notify(
-                f'✓ Erfolgreich zu BookStack übertragen!\n'
-                f'{database.name} → BookStack {pages_text}\n'
-                f'Letzte Übertragung: {sync_time}',
-                type='positive',
-                timeout=5000
-            )
-            logger.info(f"✓ Synced {database.name} to BookStack with {pages_count} page(s): {result}")
+                # Info about BookStack destination
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('info', size='sm', color='blue')
+                    ui.label(f'Ziel: {bs_config.default_shelf_name}').classes('text-sm text-grey-7')
 
-            # Trigger refresh to update card (button color, date display)
-            _force_refresh['needed'] = True
+                # Buttons
+                button_row = ui.row().classes('w-full justify-end gap-2 mt-4')
+                with button_row:
+                    ui.button('Abbrechen', on_click=dialog.close).props('flat')
 
-        else:
-            ui.notify(
-                f'✗ Fehler beim Übertragen zu BookStack:\n{result}',
-                type='negative',
-                timeout=7000
-            )
-            logger.error(f"BookStack sync failed for {database.name}: {result}")
+                    def start_sync():
+                        # Get selected options
+                        sync_docs = docs_checkbox.value
+                        sync_scripts = scripts_checkbox.value
+                        sync_erd = erd_checkbox.value
+
+                        # Check if at least one option is selected
+                        if not any([sync_docs, sync_scripts, sync_erd]):
+                            # Show error in dialog
+                            with selection_container:
+                                with ui.row().classes('items-center gap-2 p-2 bg-orange-50 rounded'):
+                                    ui.icon('warning', color='orange')
+                                    ui.label('Bitte wählen Sie mindestens einen Inhalt aus').classes('text-sm')
+                            return
+
+                        # Hide selection, show progress
+                        selection_container.style('display: none;')
+                        close_btn.style('display: none;')
+
+                        # Show progress container
+                        progress_container.style('display: block;')
+
+                        # Perform the sync with selected options (async)
+                        _perform_bookstack_sync_in_dialog(
+                            database, server, team, doc,
+                            sync_docs, sync_scripts, sync_erd,
+                            db_path, bs_config,
+                            progress_container, dialog
+                        )
+
+                    ui.button('Übertragen', icon='cloud_upload', on_click=start_sync).props('color=primary')
+
+            # Progress container (initially hidden)
+            progress_container = ui.column().classes('w-full p-6 gap-4 items-center').style('display: none;')
+            with progress_container:
+                ui.spinner(size='lg', color='primary')
+                status_label = ui.label('Übertrage zu BookStack...').classes('text-h6')
+
+        dialog.open()
 
     finally:
         db.close()
+
+
+def _perform_bookstack_sync_in_dialog(database, server, team, doc, sync_docs, sync_scripts, sync_erd, db_path, bs_config, progress_container, dialog):
+    """Perform BookStack sync with progress updates in dialog"""
+    import logging
+    import threading
+    from ..services.bookstack_service import get_bookstack_service
+
+    logger = logging.getLogger(__name__)
+
+    def sync_thread():
+        """Run sync in background thread"""
+        try:
+            # Read selected content
+            docs_content = doc.content if sync_docs and doc else None
+            scripts_content = None
+            erd_content = None
+
+            try:
+                if sync_scripts and db_path:
+                    scripts_file = db_path / 'SCRIPTS.md'
+                    if scripts_file.exists():
+                        with open(scripts_file, 'r', encoding='utf-8') as f:
+                            scripts_content = f.read()
+                        logger.info(f"✓ Read SCRIPTS.md for BookStack sync")
+
+                if sync_erd and db_path:
+                    erd_file = db_path / 'erd.svg'
+                    if erd_file.exists():
+                        with open(erd_file, 'r', encoding='utf-8') as f:
+                            erd_content = f.read()
+                        logger.info(f"✓ Read erd.svg for BookStack sync")
+
+            except Exception as e:
+                logger.error(f"Error reading content: {e}")
+                # Show error in dialog
+                progress_container.clear()
+                with progress_container:
+                    ui.icon('error', size='64px', color='red')
+                    ui.label('Fehler beim Lesen der Dateien').classes('text-h6 text-negative')
+                    ui.label(str(e)).classes('text-sm text-grey-7')
+                    ui.button('Schließen', on_click=dialog.close).props('color=primary')
+                return
+
+            # Build info about what will be synced
+            sync_items = []
+            if sync_docs:
+                sync_items.append('Dokumentation')
+            if sync_scripts:
+                sync_items.append('Scripts')
+            if sync_erd:
+                sync_items.append('ERD')
+
+            # Sync to BookStack
+            bookstack_service = get_bookstack_service()
+            success, result = bookstack_service.sync_database_to_bookstack(
+                database,
+                server,
+                docs_content,
+                scripts_content,
+                erd_content
+            )
+
+            # Update dialog with result
+            progress_container.clear()
+            with progress_container:
+                if success:
+                    # Success message
+                    ui.icon('check_circle', size='64px', color='green')
+                    ui.label('Erfolgreich übertragen!').classes('text-h5 text-positive font-bold')
+
+                    pages_count = len(sync_items)
+                    pages_info = ' + '.join(sync_items)
+
+                    ui.label(f'{database.name} → BookStack').classes('text-subtitle1')
+                    ui.label(f'Inhalte: {pages_info}').classes('text-sm text-grey-7')
+                    ui.label(f'{pages_count} {"Seite" if pages_count == 1 else "Seiten"} erstellt').classes('text-sm text-grey-7')
+
+                    # Show BookStack link if available
+                    if result and result.startswith('http'):
+                        ui.link('In BookStack öffnen', result, new_tab=True).classes('text-primary')
+
+                    logger.info(f"✓ Synced {database.name} to BookStack: {result}")
+
+                    # Trigger refresh to update card
+                    _force_refresh['needed'] = True
+                else:
+                    # Error message
+                    ui.icon('error', size='64px', color='red')
+                    ui.label('Übertragung fehlgeschlagen').classes('text-h6 text-negative')
+                    ui.label(str(result)).classes('text-sm text-grey-7')
+                    logger.error(f"BookStack sync failed: {result}")
+
+                # Close button
+                ui.button('Schließen', icon='close', on_click=dialog.close).props('color=primary')
+
+        except Exception as e:
+            logger.error(f"Error in sync thread: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+            # Show error in dialog
+            progress_container.clear()
+            with progress_container:
+                ui.icon('error', size='64px', color='red')
+                ui.label('Unerwarteter Fehler').classes('text-h6 text-negative')
+                ui.label(str(e)).classes('text-sm text-grey-7')
+                ui.button('Schließen', on_click=dialog.close).props('color=primary')
+
+    # Start sync in background thread
+    thread = threading.Thread(target=sync_thread, daemon=True)
+    thread.start()
+
+
